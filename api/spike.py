@@ -15,16 +15,22 @@ import time
 
 from bot.asgi import Resp, json_endpoint
 from bot.config import load
-from bot.selfinvoke import fire
+from bot.selfinvoke import fire_detailed
 
 
 async def handle(req):
     cfg = load()
     started = time.time()
     body = json.dumps({"started": started, "sleep": 120}).encode()
-    ok = await fire(f"{cfg.self_url}/api/spike_worker", body, cfg.internal_secret, cfg.vercel_bypass)
+    target = f"{cfg.self_url}/api/spike_worker"
+    ok, reason = await fire_detailed(target, body, cfg.internal_secret, cfg.vercel_bypass)
     return Resp(200, {
         "ok": ok,
+        # Without these two, a failure is indistinguishable from any other
+        # failure — which is exactly what happened the first time this ran
+        # against a BOT_SELF_URL that did not resolve.
+        "target": target,
+        "reason": reason,
         "started": started,
         "note": "Wait ~130s, then check the runtime logs for 'spike_survived'. "
                 "If it never appears, the self-invoke does not outlive its caller.",

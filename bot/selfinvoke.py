@@ -38,7 +38,13 @@ def verify(headers: dict[str, str], body: bytes, secret: str) -> bool:
     return hmac.compare_digest(headers.get("x-bot-sig", ""), sign(body, ts, secret))
 
 
-async def fire(url: str, body: bytes, secret: str, bypass: str | None = None) -> bool:
+async def fire_detailed(
+    url: str, body: bytes, secret: str, bypass: str | None = None
+) -> tuple[bool, str | None]:
+    """(delivered, reason). The reason is the exception CLASS on failure —
+    "ConnectError" says DNS or routing, "ConnectTimeout" says firewall, and
+    both are things you can act on. Returning a bare False, as this did at
+    first, tells you only that something went wrong somewhere."""
     ts = str(int(time.time()))
     headers = {
         "content-type": "application/json",
@@ -50,15 +56,25 @@ async def fire(url: str, body: bytes, secret: str, bypass: str | None = None) ->
         headers["x-vercel-protection-bypass"] = bypass
 
     timeout = httpx.Timeout(connect=3.0, write=3.0, read=0.4, pool=3.0)
+    last = "unknown"
     for attempt in (1, 2):
         try:
             async with httpx.AsyncClient(timeout=timeout) as c:
-                await c.post(url, content=body, headers=headers)
-            return True
+                r = await c.post(url, content=body, headers=headers)
+            # Any status means it was DELIVERED — a 401 here would mean the
+            # HMAC or a protection bypass is wrong, which is worth knowing but
+            # is not a transport failure.
+            return True, (f"http_{r.status_code}" if r.status_code >= 400 else None)
         except httpx.ReadTimeout:
-            return True  # NORMAL: delivered, the worker is running
+            return True, None  # NORMAL: delivered, the worker is running
         except Exception as exc:
+            last = type(exc).__name__
             if attempt == 2:
                 log_exception("selfinvoke_failed", exc)
-                return False
-    return False
+                return False, last
+    return False, last
+
+
+async def fire(url: str, body: bytes, secret: str, bypass: str | None = None) -> bool:
+    delivered, _ = await fire_detailed(url, body, secret, bypass)
+    return delivered
