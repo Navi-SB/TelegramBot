@@ -10,15 +10,15 @@ NOT_LINKED = (
     "👋 This is the <b>Tropis</b> assistant.\n\n"
     "This chat isn't connected to a Tropis account.\n\n"
     "To connect:\n"
-    "1. Open <a href=\"https://tropishq.com\">tropishq.com</a> and sign in\n"
-    "2. Settings → Telegram → Connect\n"
+    "1. Open <a href=\"https://tropishq.com/profile\">tropishq.com/profile</a> and sign in\n"
+    "2. Find <b>Telegram</b> → Connect Telegram\n"
     "3. Tap the link it gives you\n\n"
     "<i>I can't create an account from here.</i>"
 )
 
 LINK_FAILED = (
     "That link is invalid or has expired — they last 10 minutes and work once.\n\n"
-    "Generate a fresh one from tropishq.com → Settings → Telegram."
+    "Generate a fresh one from tropishq.com/profile → Telegram."
 )
 
 HELP = (
@@ -70,7 +70,7 @@ UNLINK_CONFIRM = (
 
 UNLINKED = (
     "Disconnected. Your Tropis data is untouched — reconnect any time from "
-    "tropishq.com → Settings → Telegram."
+    "tropishq.com/profile → Telegram."
 )
 
 UNLINK_CANCELLED = "Left connected."
