@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 class ConfigError(RuntimeError):
@@ -30,17 +31,40 @@ class Config:
         return max(10.0, self.max_duration - 25)
 
 
+def _load_dotenv() -> None:
+    """Read a local .env, for scripts and dev_poll.
+
+    On Vercel this file does not exist and real environment variables are
+    injected — hence setdefault, so a stale local .env can never shadow
+    production. Hand-rolled rather than python-dotenv purely to keep the
+    deployed bundle at ONE dependency, which is what makes cold start fast
+    enough for a sub-second webhook ack.
+    """
+    env_file = Path(__file__).resolve().parent.parent / ".env"
+    if not env_file.is_file():
+        return
+    for raw in env_file.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
 def _require(name: str) -> str:
     v = os.environ.get(name, "").strip()
     if not v:
-        raise ConfigError(
-            f"{name} is not set. The bot cannot run without it — check the "
-            "Vercel project's environment variables."
+        where = (
+            "the Vercel project's environment variables"
+            if os.environ.get("VERCEL")
+            else "your local .env (copy .env.example)"
         )
+        raise ConfigError(f"{name} is not set. Check {where}.")
     return v
 
 
 def load() -> Config:
+    _load_dotenv()
     env = os.environ.get("VERCEL_ENV", "development")
     cfg = Config(
         bot_token=_require("TELEGRAM_BOT_TOKEN"),
