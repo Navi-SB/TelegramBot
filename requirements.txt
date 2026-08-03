@@ -1,0 +1,10 @@
+# The entire dependency list. Everything else is stdlib (hmac, hashlib, json,
+# base64, secrets, asyncio, dataclasses, html, re, time, os, logging).
+#
+# Deliberately NOT python-telegram-bot: its whole abstraction (Application,
+# Updater, JobQueue, ConversationHandler, per-process context) assumes a
+# long-lived process. On serverless every one of those is dead weight, and its
+# import cost lands squarely on a sub-second webhook ack budget. The Bot API is
+# a flat POST /bot<token>/<method> with JSON in and {"ok":..,"result":..} out;
+# we use nine methods.
+httpx==0.28.1

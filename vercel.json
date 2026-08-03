@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "regions": ["cdg1"],
+  "functions": {
+    "api/telegram.py": { "maxDuration": 15 },
+    "api/worker.py": { "maxDuration": 290 },
+    "api/health.py": { "maxDuration": 10 },
+    "api/spike.py": { "maxDuration": 15 },
+    "api/spike_worker.py": { "maxDuration": 60 }
+  }
+}
