@@ -303,17 +303,23 @@ async def _turn(ctx, tg, api, *, turn_timeout: float) -> None:
         await _replace(tg, ctx.chat_id, placeholder, text)
         return
 
-    if result.get("error"):
-        await _replace(tg, ctx.chat_id, placeholder,
-                       S.agent_error(str(result["error"]).split(":")[0]))
-        return
-
     chunks: list[str] = []
     # The user's own rendered output templates go first and VERBATIM — these
     # are what gets pasted into a broker's WhatsApp, so each is its own message
     # and none of it is re-wrapped or "improved".
     for rendered in result.get("vessel_outputs") or []:
         chunks.extend(split_html(f"<pre>{_esc(rendered)}</pre>"))
+
+    if result.get("error"):
+        # A turn can fail AFTER earlier iterations already rendered outputs
+        # (e.g. bunker prices fetched, then the pool-calc iteration dies).
+        # Those are answers the user asked for — ship them, then the error.
+        chunks.append(S.agent_error(str(result["error"]).split(":")[0]))
+        await _replace(tg, ctx.chat_id, placeholder, chunks[0])
+        for extra in chunks[1:]:
+            await tg.send_safe(ctx.chat_id, extra)
+        return
+
     reply = (result.get("reply") or "").strip()
     if reply:
         chunks.extend(split_html(md_to_html(reply)))

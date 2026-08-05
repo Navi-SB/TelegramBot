@@ -285,6 +285,20 @@ async def test_an_agent_error_shows_only_the_exception_class():
     assert "/opt/voyagecalc" not in text  # paths, SQL and keys stay out
 
 
+@pytest.mark.asyncio
+async def test_outputs_rendered_before_a_late_error_still_ship():
+    """A turn can die AFTER earlier iterations produced rendered outputs
+    (bunker prices fetched, then the pool-calc iteration fails). Those are
+    answers the user asked for — they go out first, then the error."""
+    card = "Singapore bunker prices — 2026-08-04\nVLSFO: 844.5"
+    api = FakeApi(turn={"reply": "", "vessel_outputs": [card], "pending": [],
+                        "tools_used": [], "stop_reason": "error",
+                        "error": "APIError: overloaded"})
+    tg = await run(msg("concordia with current prices"), api)
+    assert "Singapore bunker prices" in tg.edits[0][1]  # card replaces placeholder
+    assert "APIError" in tg.sent[-1][1]  # the error follows as its own message
+
+
 # ---------------------------------------------------------------------------
 # unlink
 # ---------------------------------------------------------------------------
