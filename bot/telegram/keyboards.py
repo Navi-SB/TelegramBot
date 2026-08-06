@@ -12,8 +12,11 @@ from ..core.codec import MAX_BYTES, VERSION, decode, encode, ref  # noqa: F401
 
 
 def agent_picker(
-    agents: list[dict[str, Any]], page: int = 0, per_page: int = 8
+    agents: list[dict[str, Any]], page: int = 0, per_page: int = 8,
+    *, extras: bool = True,
 ) -> dict[str, Any]:
+    """extras=False drops the "Full text" row — the /short format picker is
+    a mode chooser, not an agent list."""
     start = page * per_page
     window = agents[start:start + per_page]
     rows = [
@@ -23,7 +26,8 @@ def agent_picker(
         }]
         for a in window
     ]
-    rows.append([{"text": "📄 Full text (no agent)", "callback_data": encode("a", "-")}])
+    if extras:
+        rows.append([{"text": "📄 Full text (no agent)", "callback_data": encode("a", "-")}])
 
     nav = []
     if page > 0:

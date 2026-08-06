@@ -83,11 +83,14 @@ class WhatsAppChannel:
         return await self._guard(chat_id, lambda: self._wa.send_text(chat_id, text))
 
     async def send_agent_picker(
-        self, chat_id: str, agents: list[dict[str, Any]], page: int, title: str
+        self, chat_id: str, agents: list[dict[str, Any]], page: int, title: str,
+        *, extras: bool = True,
     ) -> None:
         await self._guard(chat_id, lambda: self._wa.send_list(
-            chat_id, title, "Choose agent", picker_rows(agents, page),
-            section_title="Your agents",
+            chat_id, title,
+            "Choose agent" if extras else "Choose format",
+            picker_rows(agents, page, extras=extras),
+            section_title="Your agents" if extras else "Formats",
         ))
 
     async def send_unlink_confirm(self, chat_id: str) -> None:
