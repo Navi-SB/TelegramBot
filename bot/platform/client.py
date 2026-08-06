@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 import httpx
 
-CHANNEL = "telegram"
+CHANNEL = "telegram"  # default; WhatsApp passes channel="whatsapp"
 
 
 class PlatformError(RuntimeError):
@@ -26,10 +26,14 @@ class PlatformUnavailable(PlatformError):
 
 
 class PlatformClient:
-    def __init__(self, base: str, service_token: str, client: httpx.AsyncClient):
+    def __init__(
+        self, base: str, service_token: str, client: httpx.AsyncClient,
+        channel: str = CHANNEL,
+    ):
         self._base = base.rstrip("/")
         self._http = client
-        self._headers = {"X-Service-Token": service_token, "X-Bot-Channel": CHANNEL}
+        self._channel = channel
+        self._headers = {"X-Service-Token": service_token, "X-Bot-Channel": channel}
 
     async def _call(self, method: str, path: str, **kw) -> Any:
         try:
@@ -53,7 +57,7 @@ class PlatformClient:
         for up to 24h, and a redelivered Approve would apply a write twice."""
         res = await self._call(
             "POST", "/api/bot/events/claim",
-            json={"channel": CHANNEL, "event_id": str(event_id)},
+            json={"channel": self._channel, "event_id": str(event_id)},
         )
         return bool(res.get("fresh"))
 
@@ -61,37 +65,37 @@ class PlatformClient:
 
     async def redeem(self, chat_id: str, code: str, tg_user_id: str, name: str | None):
         return await self._call("POST", "/api/bot/link/redeem", json={
-            "channel": CHANNEL, "chat_id": chat_id, "code": code,
+            "channel": self._channel, "chat_id": chat_id, "code": code,
             "channel_user_id": tg_user_id, "display_name": name,
         })
 
     async def get_link(self, chat_id: str) -> dict[str, Any]:
         return await self._call(
-            "GET", "/api/bot/link", params={"channel": CHANNEL, "chat_id": chat_id}
+            "GET", "/api/bot/link", params={"channel": self._channel, "chat_id": chat_id}
         )
 
     async def revoke(self, chat_id: str):
         return await self._call(
-            "POST", "/api/bot/link/revoke", json={"channel": CHANNEL, "chat_id": chat_id}
+            "POST", "/api/bot/link/revoke", json={"channel": self._channel, "chat_id": chat_id}
         )
 
     async def mark_blocked(self, chat_id: str):
         return await self._call(
-            "POST", "/api/bot/link/blocked", json={"channel": CHANNEL, "chat_id": chat_id}
+            "POST", "/api/bot/link/blocked", json={"channel": self._channel, "chat_id": chat_id}
         )
 
     # --- agents and sessions ------------------------------------------------
 
     async def agents(self, chat_id: str) -> dict[str, Any]:
         return await self._call(
-            "GET", "/api/bot/agents", params={"channel": CHANNEL, "chat_id": chat_id}
+            "GET", "/api/bot/agents", params={"channel": self._channel, "chat_id": chat_id}
         )
 
     async def set_session(
         self, chat_id: str, preset_id: Optional[str] = None, *, new_thread: bool = False
     ) -> dict[str, Any]:
         return await self._call("POST", "/api/bot/session", json={
-            "channel": CHANNEL, "chat_id": chat_id,
+            "channel": self._channel, "chat_id": chat_id,
             "preset_id": preset_id, "new_thread": new_thread,
         })
 
@@ -102,12 +106,12 @@ class PlatformClient:
         reply, so the narration rule lives in exactly one place."""
         return await self._call(
             "POST", "/api/bot/turn",
-            json={"channel": CHANNEL, "chat_id": chat_id, "content": content},
+            json={"channel": self._channel, "chat_id": chat_id, "content": content},
             timeout=timeout,
         )
 
     async def confirm(self, chat_id: str, pending_id: str, action: str) -> dict[str, Any]:
         return await self._call("POST", "/api/bot/confirm", json={
-            "channel": CHANNEL, "chat_id": chat_id,
+            "channel": self._channel, "chat_id": chat_id,
             "pending_id": pending_id, "action": action,
         })
