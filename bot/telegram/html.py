@@ -86,13 +86,24 @@ def md_to_html(md: str) -> str:
         flush_table()
 
         s = esc(line)
-        s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+        # Mask code spans FIRST, behind placeholders, so the bold/italic rules
+        # below cannot chew on their contents or pair a * inside a span with a
+        # * outside it — which produced tags interleaved across <code>
+        # boundaries, and Telegram rejects the whole message for it.
+        spans: list[str] = []
+
+        def _mask(m, _spans=spans):
+            _spans.append(f"<code>{m.group(1)}</code>")
+            return f"\x00{len(_spans) - 1}\x00"
+
+        s = re.sub(r"`([^`]+)`", _mask, s)
         s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
         s = re.sub(r"__([^_]+)__", r"<b>\1</b>", s)
         s = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", s)
         s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', s)
         s = re.sub(r"^#{1,6}\s+(.*)$", r"<b>\1</b>", s)
         s = re.sub(r"^\s*[-*+]\s+", "• ", s)
+        s = re.sub(r"\x00(\d+)\x00", lambda m: spans[int(m.group(1))], s)
         out.append(s)
 
     if in_fence and fence_buf:

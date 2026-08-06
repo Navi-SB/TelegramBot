@@ -55,3 +55,45 @@ def test_csv_rows_are_never_welded_across_a_wrap():
     joined = "".join(strip_tags(p) for p in parts)
     assert "ROWONE" in joined and "ROWTWO" in joined
     assert joined.count("x") == 1993 and joined.count("y") == 1774
+
+
+# ---------------------------------------------------------------------------
+# md_to_html must not chew on its own output (code spans vs inline rules)
+# ---------------------------------------------------------------------------
+def _balanced(out: str) -> bool:
+    stack: list[str] = []
+    for m in re.finditer(r"</?([a-z-]+)>", out):
+        if m.group(0).startswith("</"):
+            if not stack or stack[-1] != m.group(1):
+                return False
+            stack.pop()
+        else:
+            stack.append(m.group(1))
+    return not stack
+
+
+def test_a_star_inside_a_code_span_cannot_pair_with_one_outside():
+    out = md_to_html("`**` bold **real**")
+    assert "<code>**</code>" in out
+    assert "<b>real</b>" in out
+    assert _balanced(out)
+
+
+def test_code_span_contents_are_left_alone():
+    out = md_to_html("use `a * b` then *emphasis*")
+    assert "<code>a * b</code>" in out
+    assert "<i>emphasis</i>" in out
+    assert _balanced(out)
+
+
+def test_backtick_and_asterisk_replies_always_produce_nested_tags():
+    """The failure NAV-37 describes: an ordinary reply mixing backticks and
+    asterisks rendered as HTML with tags interleaved across <code> boundaries,
+    which Telegram rejects wholesale."""
+    samples = [
+        "`*` marks a footnote, *see below*",
+        "run `cmd **flag**` and **note** the output",
+        "`x**y` times `z**w` is **big**",
+    ]
+    for s in samples:
+        assert _balanced(md_to_html(s)), s
