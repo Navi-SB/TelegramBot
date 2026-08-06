@@ -8,7 +8,7 @@ from bot.core.codec import encode, ref
 from bot.core.dispatch import handle_inbound
 from bot.platform.client import PlatformError
 from bot.whatsapp import strings as S
-from bot.whatsapp.api import WhatsAppUndeliverable
+from bot.whatsapp.api import WhatsAppError, WhatsAppUndeliverable, WhatsAppWindowClosed
 from bot.whatsapp.channel import WhatsAppChannel
 from bot.whatsapp.parse import parse_envelopes
 from tests.test_dispatch import FakeApi
@@ -255,3 +255,35 @@ async def test_an_undeliverable_send_marks_the_chat_blocked_once():
     api = FakeApi(turn=turn_result(reply="a\n\nb", vessel_outputs=["OUT1", "OUT2"]))
     await run(text_msg("hello"), api, wa=UnreachableWa())
     assert api.calls.count("blocked") == 1       # not once per chunk
+
+
+# ---------------------------------------------------------------------------
+# review findings, pinned: delivery accounting and the double-send trap
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_a_swallowed_send_is_not_counted_as_delivered():
+    """WindowClosed/undeliverable sends are swallowed by the channel guard —
+    they must come back False so Progress never counts them delivered."""
+    class ClosedWa(FakeWa):
+        async def send_text(self, to, body):
+            raise WhatsAppWindowClosed(131047, None, "window closed")
+
+    ch = WhatsAppChannel(ClosedWa(), FakeApi())
+    assert await ch.send(NUM, "hello") is False
+
+
+@pytest.mark.asyncio
+async def test_a_first_chunk_failure_is_not_sent_twice():
+    """The placeholder-edit fallback is Telegram-only. On WhatsApp a failed
+    first chunk used to be re-sent by that fallback — a duplicate message
+    whenever the first attempt had actually reached Meta."""
+    attempts = []
+
+    class FlakyWa(FakeWa):
+        async def send_text(self, to, body):
+            attempts.append(body)
+            raise WhatsAppError(400, None, "boom")
+
+    api = FakeApi(turn=turn_result(reply="one-chunk answer"))
+    await run(text_msg("q"), api, wa=FlakyWa())
+    assert attempts.count(attempts[0]) == 1  # one attempt per chunk, no retry-send

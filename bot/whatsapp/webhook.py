@@ -26,16 +26,25 @@ from ..logging import log
 def valid_signature(headers: dict[str, str], body: bytes, app_secret: str) -> bool:
     presented = headers.get("x-hub-signature-256", "")
     expected = "sha256=" + hmac.new(app_secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(presented, expected)
+    # Bytes, not str: compare_digest raises TypeError on non-ASCII str input,
+    # which would turn the uniform 401 into a distinguishable 500 for probers.
+    return hmac.compare_digest(presented.encode(), expected.encode())
 
 
-def is_actionable(update: dict[str, Any]) -> bool:
-    """True only when some change actually carries inbound messages —
-    statuses-only payloads (delivery receipts) never wake a worker."""
+def is_actionable(update: dict[str, Any], phone_number_id: str | None = None) -> bool:
+    """True only when some change actually carries inbound messages for OUR
+    number — statuses-only payloads (delivery receipts) and traffic addressed
+    to other numbers on the same Meta app never wake a worker."""
     if update.get("object") != "whatsapp_business_account":
         return False
+    def ours(value: dict[str, Any]) -> bool:
+        if not phone_number_id:
+            return True
+        return (value.get("metadata") or {}).get("phone_number_id") == phone_number_id
     return any(
-        c.get("field") == "messages" and (c.get("value") or {}).get("messages")
+        c.get("field") == "messages"
+        and (c.get("value") or {}).get("messages")
+        and ours(c.get("value") or {})
         for e in update.get("entry") or []
         for c in e.get("changes") or []
     )
@@ -47,7 +56,8 @@ async def handle_webhook(req: Req, cfg, fire_fn) -> Resp:
         if (
             req.query.get("hub.mode") == "subscribe"
             and token
-            and hmac.compare_digest(req.query.get("hub.verify_token", ""), token)
+            and hmac.compare_digest(
+                req.query.get("hub.verify_token", "").encode(), token.encode())
         ):
             return Resp(200, text=req.query.get("hub.challenge", ""))
         log("wa_webhook_bad_verify")
@@ -66,7 +76,7 @@ async def handle_webhook(req: Req, cfg, fire_fn) -> Resp:
         # garbage for up to 36 hours.
         return Resp(200, {"ok": True})
 
-    if not is_actionable(update):
+    if not is_actionable(update, cfg.wa_phone_number_id):
         return Resp(200, {"ok": True})
 
     if await fire_fn(f"{cfg.self_url}/api/wa_worker", req.body, cfg.internal_secret,

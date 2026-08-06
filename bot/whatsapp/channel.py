@@ -25,14 +25,17 @@ CARD_LIMIT = 950  # interactive body hard cap is 1024
 
 
 class WhatsAppProgress(Progress):
-    """No edit API: every chunk is a plain send."""
+    """No edit API: every chunk is a plain send (edit_first stays False, so a
+    failed first chunk is never re-sent by the placeholder fallback)."""
 
     def __init__(self, ch: "WhatsAppChannel", chat_id: str):
         super().__init__(chat_id, log_ref(chat_id))
         self._ch = ch
 
-    async def _send(self, chunk: str) -> None:
-        await self._ch.send(self.chat_id, chunk)
+    async def _send(self, chunk: str) -> bool:
+        # False = the channel swallowed it (undeliverable / window closed);
+        # Progress must not count it as delivered.
+        return await self._ch.send(self.chat_id, chunk)
 
 
 class WhatsAppChannel:
@@ -45,13 +48,15 @@ class WhatsAppChannel:
 
     # --- undeliverable handling --------------------------------------------
 
-    async def _guard(self, chat_id: str, thunk) -> None:
+    async def _guard(self, chat_id: str, thunk) -> bool:
         """Run one send; on 131026 mark the chat blocked (once) and go quiet —
-        WhatsApp's only blocked signal is a failed send."""
+        WhatsApp's only blocked signal is a failed send. Returns False when
+        the send was swallowed so callers never count it as delivered."""
         if chat_id in self._unreachable:
-            return
+            return False
         try:
             await thunk()
+            return True
         except WhatsAppUndeliverable:
             log("whatsapp_undeliverable", chat_id=log_ref(chat_id))
             self._unreachable.add(chat_id)
@@ -60,10 +65,12 @@ class WhatsAppChannel:
                     await self._api.mark_blocked(chat_id)
                 except PlatformError:
                     pass
+            return False
         except WhatsAppWindowClosed as exc:
             # Only reachable on Meta's extreme retry tail; nothing can be sent
             # without a paid template, so log and move on.
             log_exception("whatsapp_window_closed", exc, chat_id=log_ref(chat_id))
+            return False
 
     # --- Channel protocol ---------------------------------------------------
 
@@ -72,8 +79,8 @@ class WhatsAppChannel:
         # mark_read never raises; the indicator clears when the reply lands.
         await self._wa.mark_read(ctx.event_id, typing=True)
 
-    async def send(self, chat_id: str, text: str) -> None:
-        await self._guard(chat_id, lambda: self._wa.send_text(chat_id, text))
+    async def send(self, chat_id: str, text: str) -> bool:
+        return await self._guard(chat_id, lambda: self._wa.send_text(chat_id, text))
 
     async def send_agent_picker(
         self, chat_id: str, agents: list[dict[str, Any]], page: int, title: str

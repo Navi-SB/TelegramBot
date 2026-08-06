@@ -12,6 +12,7 @@ message, so the worst a stray marker can do is cosmetic.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 
 LIMIT = 4096
@@ -19,12 +20,20 @@ LIMIT = 4096
 SAFE = 3800
 
 
-def log_ref(chat_id: str) -> str:
-    """WhatsApp chat ids are phone numbers — PII. Logs carry this instead."""
-    return hashlib.blake2s(chat_id.encode(), digest_size=4).hexdigest()
+def log_ref(value: str) -> str:
+    """WhatsApp chat ids are phone numbers — PII. Logs carry this instead.
+
+    Keyed with BOT_INTERNAL_SECRET: phone numbers are a low-entropy space, so
+    an unkeyed 4-byte hash could be inverted by enumeration by anyone holding
+    the logs. With the key, the mapping cannot be recomputed from logs alone.
+    (Unkeyed fallback exists only for the test environment.)"""
+    secret = os.environ.get("BOT_INTERNAL_SECRET", "")
+    key = hashlib.blake2s(secret.encode()).digest()[:16] if secret else b""
+    return hashlib.blake2s(value.encode(), key=key, digest_size=8).hexdigest()
 
 
 def md_to_wa(md: str) -> str:
+    md = md.replace("\r\n", "\n").replace("\r", "\n")
     out: list[str] = []
     in_fence = False
     fence_buf: list[str] = []
@@ -33,11 +42,14 @@ def md_to_wa(md: str) -> str:
     def flush_table():
         if not table_buf:
             return
+        # Markdown's delimiter row is only ever the SECOND line of a table —
+        # filtering every row by shape also deleted data rows like '| - | - |'
+        # ('-' as empty-value marker is common in shipping tables).
+        sep = re.compile(r"\s*\|?[\s:\-|]+\|?\s*")
         rows = [
             [c.strip() for c in r.strip().strip("|").split("|")]
-            for r in table_buf
-            # the |---|---| separator row carries no data
-            if not re.fullmatch(r"\s*\|?[\s:\-|]+\|?\s*", r)
+            for i, r in enumerate(table_buf)
+            if not (i == 1 and sep.fullmatch(r))
         ]
         table_buf.clear()
         if not rows:
@@ -55,6 +67,7 @@ def md_to_wa(md: str) -> str:
 
     for line in md.split("\n"):
         if line.strip().startswith("```"):
+            flush_table()  # a buffered table must not teleport across the fence
             if in_fence:
                 out.append("```\n" + "\n".join(fence_buf) + "\n```")
                 fence_buf.clear()
@@ -76,6 +89,10 @@ def md_to_wa(md: str) -> str:
 
 
 def _inline(s: str) -> str:
+    # Literal \x00/\x01 in the input would collide with the mask placeholders
+    # below (worst case IndexError, silently-wrong span otherwise). Control
+    # chars have no legitimate rendering — drop them first.
+    s = s.replace("\x00", "").replace("\x01", "")
     # Mask code spans first so no other rule chews their contents (the same
     # defect NAV-37 pinned on the Telegram renderer).
     spans: list[str] = []
@@ -121,15 +138,17 @@ def split_wa(text: str, limit: int = SAFE) -> list[str]:
     cur: list[str] = []
     cur_len = 0
     in_fence = False
+    has_content = False  # fence markers alone must never become a part
 
     def flush():
-        nonlocal cur, cur_len
-        if in_fence:
-            cur.append("```")
-        if cur and "\n".join(cur).strip():
+        nonlocal cur, cur_len, has_content
+        if has_content:
+            if in_fence:
+                cur.append("```")
             parts.append("\n".join(cur))
         cur = ["```"] if in_fence else []
-        cur_len = len("```") + 1 if in_fence else 0
+        cur_len = 4 if in_fence else 0
+        has_content = False
 
     for line in text.split("\n"):
         pieces = [line] if len(line) <= limit else _wrap_line(line, limit)
@@ -139,8 +158,15 @@ def split_wa(text: str, limit: int = SAFE) -> list[str]:
                 flush()
             cur.append(piece)
             cur_len += len(piece) + 1
-            if piece.strip() == "```" or (piece.strip().startswith("```") and not in_fence):
+            st = piece.strip()
+            # A fence line toggles only when its backtick-triple count is odd:
+            # balanced inline monospace at line start (WhatsApp's own syntax,
+            # common in verbatim vessel output) is NOT a fence.
+            if st == "```" or (st.startswith("```") and st.count("```") % 2 == 1
+                               and not in_fence):
                 in_fence = not in_fence
+            elif st:
+                has_content = True
     flush()
 
     if len(parts) > 1:

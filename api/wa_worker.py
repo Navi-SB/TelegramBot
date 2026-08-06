@@ -2,9 +2,12 @@
 
 Reached only via the signed self-invoke from /api/whatsapp. One webhook POST
 can batch several inbound messages; each is claimed (deduped on its wamid)
-and handled separately, so a redelivered batch only replays what didn't
-finish. Meta retries for up to 36 hours — the claim is what makes a
-redelivered Approve harmless.
+and handled separately — the loop itself lives in bot/whatsapp/worker.py
+where the tests can reach it. Meta retries for up to 36 hours; the claim is
+what makes a redelivered Approve harmless.
+
+Log hygiene: raw wamids never appear in logs — a wamid base64-encodes the
+sender's phone number, so both chat and event references are keyed hashes.
 """
 from __future__ import annotations
 
@@ -14,13 +17,13 @@ import httpx
 
 from bot.asgi import Resp, json_endpoint
 from bot.config import load
-from bot.core.dispatch import handle_inbound
-from bot.logging import log, log_exception
-from bot.platform.client import PlatformClient, PlatformUnavailable
+from bot.logging import log
+from bot.platform.client import PlatformClient
 from bot.selfinvoke import verify
 from bot.whatsapp.api import WhatsAppClient
 from bot.whatsapp.channel import WhatsAppChannel
 from bot.whatsapp.parse import parse_envelopes
+from bot.whatsapp.worker import process_envelopes
 
 
 async def handle(req):
@@ -31,28 +34,17 @@ async def handle(req):
         log("wa_worker_unconfigured")
         return Resp(500, {"ok": False, "error": "whatsapp env vars missing"})
 
-    envelopes = parse_envelopes(json.loads(req.body))
+    envelopes = parse_envelopes(json.loads(req.body), cfg.wa_phone_number_id)
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
         wa = WhatsAppClient(cfg.wa_access_token, cfg.wa_phone_number_id, http,
                             cfg.wa_graph_version)
         api = PlatformClient(cfg.api_base, cfg.service_token, http, channel="whatsapp")
-        ch = WhatsAppChannel(wa, api)
-
-        for ctx in envelopes:
-            # Dedupe BEFORE doing anything with side effects.
-            try:
-                if not await api.claim_event(ctx.event_id):
-                    log("duplicate_update", update_id=ctx.event_id)
-                    continue
-            except PlatformUnavailable as exc:
-                log_exception("claim_failed", exc, update_id=ctx.event_id)
-                continue
-
-            try:
-                await handle_inbound(ctx, ch, api, turn_timeout=cfg.deadline_seconds)
-            except Exception as exc:  # noqa: BLE001 — outermost boundary
-                log_exception("worker_failed", exc, update_id=ctx.event_id)
+        await process_envelopes(
+            envelopes, WhatsAppChannel(wa, api), api,
+            turn_timeout=cfg.deadline_seconds,
+            budget_seconds=float(cfg.max_duration),
+        )
 
     return Resp(200, {"ok": True})
 

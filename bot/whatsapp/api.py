@@ -24,7 +24,8 @@ import httpx
 from ..logging import log_exception
 
 GRAPH = "https://graph.facebook.com"
-_RETRYABLE = {130429, 131056}
+_RETRYABLE = {130429, 131056, 80007}  # throughput / pair / WABA rate limits
+_TRANSIENT = {1, 2}  # Graph "API Unknown" / "API Service" — Meta says wait and retry
 
 
 class WhatsAppError(RuntimeError):
@@ -76,7 +77,9 @@ class WhatsAppClient:
                 # No retry_after hint exists on the Cloud API; fixed backoff.
                 await asyncio.sleep(1.0 * (attempt + 1))
                 continue
-            if r.status_code >= 500 and code >= 500 and attempt < retries:
+            # Graph transients arrive as HTTP 500 with body code 1 or 2 —
+            # the body code is what identifies them, not the status.
+            if (code in _TRANSIENT or r.status_code >= 500) and attempt < retries:
                 await asyncio.sleep(0.5 * (attempt + 1))
                 continue
             if code == 131026:

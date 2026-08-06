@@ -117,3 +117,28 @@ def test_statuses_only_payloads_yield_nothing():
 
 def test_non_whatsapp_objects_yield_nothing():
     assert parse_envelopes({"object": "page", "entry": []}) == []
+
+
+# ---------------------------------------------------------------------------
+# review findings, pinned
+# ---------------------------------------------------------------------------
+def test_unsupported_content_gets_the_text_only_nudge_not_silence():
+    """type=unsupported means the user actively sent something (a poll,
+    view-once media) — they must hear the bot is text-only."""
+    msg = {"from": NUM, "id": "wamid.U1", "type": "unsupported",
+           "errors": [{"code": 131051, "title": "Message type unknown"}]}
+    [ctx] = parse_envelopes(wa_body([msg]))
+    assert ctx.is_unsupported_media
+
+
+def test_changes_for_another_phone_number_are_skipped():
+    body = wa_body([text_msg("hello")])
+    assert parse_envelopes(body, "111") != []       # matches the fixture metadata
+    assert parse_envelopes(body, "999") == []       # another number's traffic
+    assert parse_envelopes(body) != []              # no filter when unset
+
+
+def test_empty_and_whitespace_bodies_produce_no_envelope():
+    """'' answered nothing after an ack; '  ' burned a real agent turn."""
+    assert parse_envelopes(wa_body([text_msg("")])) == []
+    assert parse_envelopes(wa_body([text_msg("   ")])) == []

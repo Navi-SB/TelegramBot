@@ -57,7 +57,7 @@ class TelegramProgress(Progress):
     """First chunk replaces the '⏳ Thinking…' placeholder; the rest are sends."""
 
     def __init__(self, tg, chat_id: str, placeholder: Optional[int]):
-        super().__init__(chat_id)
+        super().__init__(chat_id, edit_first=bool(placeholder))
         self._tg = tg
         self._placeholder = placeholder
 

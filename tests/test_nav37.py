@@ -252,3 +252,34 @@ async def test_a_status_conflict_409_still_reads_as_success():
                         Api409("Pending write p1 is approved, not pending."),
                         turn_timeout=30)
     assert "Already resolved" in tg.all_text
+
+
+# ---------------------------------------------------------------------------
+# review findings, pinned (Telegram side)
+# ---------------------------------------------------------------------------
+def test_placeholder_shaped_input_does_not_crash_md_to_html():
+    out = md_to_html("before \x007\x00 after")
+    assert "7" in strip_tags(out)
+    out = md_to_html("has `code` and stray \x000\x00 too")
+    assert "<code>code</code>" in out
+
+
+def test_a_table_does_not_teleport_across_a_fence_html():
+    out = md_to_html("| a | b |\n|---|---|\n| 1 | 2 |\n```\ncode here\n```\ntail")
+    assert out.index("a  b") < out.index("code here") < out.index("tail")
+
+
+def test_all_dash_data_rows_survive_html():
+    out = strip_tags(md_to_html("| item | val |\n|---|---|\n| - | - |\n| x | 1 |"))
+    assert re.search(r"^-\s+-$", out, re.M), out
+
+
+@pytest.mark.asyncio
+async def test_agent_no_match_escapes_the_query():
+    """Declared behavior change (found in review): the old raw interpolation
+    made Telegram reject the message and the strip_tags fallback then ATE the
+    user's query. Escaping keeps it visible."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    tg = FakeTg()
+    await handle_update(msg("/agent <handysize>"), tg, api, turn_timeout=30)
+    assert "No agent matches <b>&lt;handysize&gt;</b>." in tg.all_text

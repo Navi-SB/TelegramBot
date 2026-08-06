@@ -152,3 +152,64 @@ def test_button_titles_fit_whatsapps_20_char_cap():
     for bid, title in confirm_write_buttons("9f2c" + "a" * 28) + unlink_buttons():
         assert len(title) <= 20
         assert len(bid.encode()) <= 64
+
+
+# ---------------------------------------------------------------------------
+# review findings, pinned
+# ---------------------------------------------------------------------------
+def test_a_table_does_not_teleport_across_a_fence():
+    out = md_to_wa("| a | b |\n|---|---|\n| 1 | 2 |\n```\ncode here\n```\ntail")
+    assert out.index("a  b") < out.index("code here") < out.index("tail")
+
+
+def test_two_tables_split_by_a_fence_stay_two_tables():
+    out = md_to_wa("| a |\n|---|\n| 1 |\n```\nX\n```\n| b |\n|---|\n| 2 |")
+    assert out.count("```") == 6  # table, fence, table — three fenced blocks
+
+
+def test_all_dash_data_rows_survive():
+    """'-' as empty-value marker is common in shipping tables; only the
+    delimiter row (line 2) carries no data."""
+    out = md_to_wa("| item | val |\n|---|---|\n| - | - |\n| x | 1 |")
+    assert re.search(r"^-\s+-$", out, re.M), out  # the dash row, column-aligned
+    assert "|---|" not in out
+
+
+def test_placeholder_shaped_input_does_not_crash_or_corrupt():
+    assert md_to_wa("before \x007\x00 after") == "before 7 after"
+    assert md_to_wa("before \x011\x01 after") == "before 1 after"
+    out = md_to_wa("has `code` and stray \x000\x00 too")
+    assert "`code`" in out and "stray 0 too" in out
+
+
+def test_no_part_is_only_fence_markers():
+    parts = split_wa(md_to_wa("```\n" + "B" * 9000 + "\n```"))
+    for part in parts:
+        body = re.sub(r"\n\n\(\d+/\d+\)$", "", part)
+        assert body.replace("```", "").strip(), repr(part[:40])
+    # trailing variant
+    lines = ["x" * 100] * 74 + ["y" * 3790]
+    for part in split_wa("```\n" + "\n".join(lines) + "\n```"):
+        body = re.sub(r"\n\n\(\d+/\d+\)$", "", part)
+        assert body.replace("```", "").strip(), repr(part[:40])
+
+
+def test_inline_monospace_at_line_start_is_not_a_fence():
+    """Vessel outputs are WhatsApp-native and may open with balanced inline
+    monospace; that must not flip the splitter into fence mode."""
+    text = "```MV OCEAN GLORY``` - 82,000 DWT open Singapore\n" + \
+        "\n".join(f"line {i} " + "d" * 120 for i in range(80))
+    parts = split_wa(text, limit=800)
+    for part in parts:
+        for line in part.splitlines():
+            assert line.strip() != "```", part[:80]
+
+
+def test_log_ref_is_keyed_by_the_internal_secret(monkeypatch):
+    from bot.whatsapp.render import log_ref
+    monkeypatch.setenv("BOT_INTERNAL_SECRET", "secret-a")
+    a = log_ref("306912345678")
+    monkeypatch.setenv("BOT_INTERNAL_SECRET", "secret-b")
+    b = log_ref("306912345678")
+    assert a != b                       # not recomputable without the key
+    assert "306912345678" not in a

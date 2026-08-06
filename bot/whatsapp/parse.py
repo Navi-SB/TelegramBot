@@ -16,16 +16,25 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ..core.dispatch import Inbound
+from ..logging import log
 from .render import log_ref
 
 _BARE_WORDS = {"agents", "new", "status", "unlink", "help", "menu"}
+# "unsupported" is deliberately in MEDIA, not IGNORED: the user actively sent
+# something (a poll, view-once media) and must hear that the bot is text-only.
 _MEDIA_TYPES = {
-    "image", "video", "audio", "voice", "document", "sticker", "location", "contacts",
+    "image", "video", "audio", "document", "sticker", "location", "contacts",
+    "unsupported",
 }
-_IGNORED_TYPES = {"reaction", "system", "ephemeral", "unsupported", "order", "request_welcome"}
+_IGNORED_TYPES = {"reaction", "system", "ephemeral", "order", "request_welcome"}
 
 
-def parse_envelopes(body: dict[str, Any]) -> list[Inbound]:
+def parse_envelopes(
+    body: dict[str, Any], phone_number_id: str | None = None
+) -> list[Inbound]:
+    """phone_number_id: when set, changes addressed to OTHER numbers on the
+    same Meta app are skipped — the webhook is per-app, not per-number, so
+    without this a test number's traffic would be answered from production."""
     out: list[Inbound] = []
     if body.get("object") != "whatsapp_business_account":
         return out
@@ -34,6 +43,11 @@ def parse_envelopes(body: dict[str, Any]) -> list[Inbound]:
             if change.get("field") != "messages":
                 continue
             value = change.get("value") or {}
+            if phone_number_id and (
+                (value.get("metadata") or {}).get("phone_number_id") != phone_number_id
+            ):
+                log("wa_foreign_number")
+                continue
             names = {
                 c.get("wa_id"): (c.get("profile") or {}).get("name")
                 for c in value.get("contacts") or []
@@ -60,6 +74,10 @@ def _parse_message(m: dict[str, Any], names: dict[str, Optional[str]]) -> Option
 
     if mtype == "text":
         text = (m.get("text") or {}).get("body") or ""
+        if not text.strip():
+            # Empty or whitespace-only bodies would ack + claim and then
+            # either answer nothing or burn a real agent turn on two spaces.
+            return None
         command, args = _parse_command(text)
     elif mtype == "interactive":
         inter = m.get("interactive") or {}

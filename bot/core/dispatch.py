@@ -52,29 +52,38 @@ class Progress:
     (and optionally _send_first, e.g. to edit a placeholder).
     """
 
-    def __init__(self, chat_id: str, log_ref: str | None = None):
+    def __init__(self, chat_id: str, log_ref: str | None = None, *, edit_first: bool = False):
         self.chat_id = chat_id
         self.log_ref = log_ref or chat_id
         self.delivered = 0
         self._first = True
+        # Only a channel whose first send EDITS something (Telegram's
+        # placeholder) gets the edit-failed→plain-send fallback. On a
+        # send-only channel that fallback would double-send the first chunk
+        # whenever the first attempt failed after actually reaching the user.
+        self._edit_first = edit_first
 
-    async def _send(self, chunk: str) -> None:  # pragma: no cover — abstract
+    async def _send(self, chunk: str):  # pragma: no cover — abstract
         raise NotImplementedError
 
-    async def _send_first(self, chunk: str) -> None:
-        await self._send(chunk)
+    async def _send_first(self, chunk: str):
+        return await self._send(chunk)
 
     async def emit(self, chunk: str) -> bool:
         try:
-            if self._first:
+            if self._first and self._edit_first:
                 try:
-                    await self._send_first(chunk)
+                    res = await self._send_first(chunk)
                 except Exception as exc:  # noqa: BLE001
                     # The edit failing must not eat the answer — send it plain.
                     log_exception("placeholder_edit_failed", exc, chat_id=self.log_ref)
-                    await self._send(chunk)
+                    res = await self._send(chunk)
             else:
-                await self._send(chunk)
+                res = await self._send(chunk)
+            if res is False:
+                # The channel swallowed the send (and already logged why) —
+                # it must not count as delivered or turn_done lies.
+                return False
             self.delivered += 1
             return True
         except Exception as exc:  # noqa: BLE001 — isolate per message

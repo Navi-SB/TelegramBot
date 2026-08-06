@@ -50,11 +50,14 @@ def md_to_html(md: str) -> str:
     def flush_table():
         if not table_buf:
             return
+        # Markdown's delimiter row is only ever the SECOND line of a table —
+        # filtering every row by shape also deleted data rows like '| - | - |'
+        # ('-' as empty-value marker is common in shipping tables).
+        sep = re.compile(r"\s*\|?[\s:\-|]+\|?\s*")
         rows = [
             [c.strip() for c in r.strip().strip("|").split("|")]
-            for r in table_buf
-            # the |---|---| separator row carries no data
-            if not re.fullmatch(r"\s*\|?[\s:\-|]+\|?\s*", r)
+            for i, r in enumerate(table_buf)
+            if not (i == 1 and sep.fullmatch(r))
         ]
         table_buf.clear()
         if not rows:
@@ -72,6 +75,7 @@ def md_to_html(md: str) -> str:
 
     for line in md.split("\n"):
         if line.strip().startswith("```"):
+            flush_table()  # a buffered table must not teleport across the fence
             if in_fence:
                 out.append("<pre><code>" + esc("\n".join(fence_buf)) + "</code></pre>")
                 fence_buf.clear()
@@ -86,6 +90,9 @@ def md_to_html(md: str) -> str:
         flush_table()
 
         s = esc(line)
+        # Literal \x00 in the input would collide with the mask placeholders
+        # (worst case IndexError, silently-wrong span otherwise).
+        s = s.replace("\x00", "")
         # Mask code spans FIRST, behind placeholders, so the bold/italic rules
         # below cannot chew on their contents or pair a * inside a span with a
         # * outside it — which produced tags interleaved across <code>

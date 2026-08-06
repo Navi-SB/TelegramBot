@@ -15,6 +15,7 @@ VERIFY = "verify-token-for-tests"
 class Cfg:
     wa_verify_token = VERIFY
     wa_app_secret = APP_SECRET
+    wa_phone_number_id = None  # None = no per-number filtering in these tests
     self_url = "https://bots.example"
     internal_secret = "internal"
     vercel_bypass = None
@@ -144,3 +145,42 @@ def test_actionability_shapes():
     assert not is_actionable(json.loads(statuses_body()))
     assert not is_actionable({"object": "page", "entry": []})
     assert not is_actionable({"object": "whatsapp_business_account", "entry": []})
+
+
+# ---------------------------------------------------------------------------
+# review findings, pinned
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_non_ascii_verify_token_gets_403_not_500():
+    """hmac.compare_digest raises TypeError on non-ASCII str — a prober must
+    still see the uniform 403, not a distinguishable 500."""
+    req = Req(method="GET", query={"hub.mode": "subscribe",
+                                   "hub.verify_token": "\uff41\ufffd",
+                                   "hub.challenge": "x"})
+    res = await handle_webhook(req, Cfg(), Fire())
+    assert res.status == 403
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_signature_gets_401_not_500():
+    body = messages_body()
+    req = Req(method="POST", body=body,
+              headers={"x-hub-signature-256": "sha256=\u00ff" * 8})
+    res = await handle_webhook(req, Cfg(), Fire())
+    assert res.status == 401
+
+
+def wa_change(value):
+    return {"object": "whatsapp_business_account",
+            "entry": [{"changes": [{"field": "messages", "value": value}]}]}
+
+
+def test_traffic_for_another_number_on_the_same_app_is_not_actionable():
+    """Webhook subscriptions are per-Meta-app: a test number's traffic must
+    not be answered from the production number."""
+    value = {"metadata": {"phone_number_id": "TEST-NUMBER"},
+             "messages": [{"from": "306912345678", "id": "wamid.X",
+                           "type": "text", "text": {"body": "hi"}}]}
+    assert is_actionable(wa_change(value), None)            # unfiltered
+    assert is_actionable(wa_change(value), "TEST-NUMBER")   # ours
+    assert not is_actionable(wa_change(value), "PROD-NUMBER")
