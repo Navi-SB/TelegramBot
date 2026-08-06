@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
+from urllib.parse import parse_qsl
 
 from .logging import log_exception
 
@@ -23,6 +24,7 @@ class Req:
     headers: dict[str, str] = field(default_factory=dict)
     body: bytes = b""
     query: dict[str, str] = field(default_factory=dict)
+    method: str = "POST"
 
     def json(self) -> Any:
         return json.loads(self.body or b"{}")
@@ -32,6 +34,9 @@ class Req:
 class Resp:
     status: int = 200
     body: dict[str, Any] = field(default_factory=lambda: {"ok": True})
+    # Raw text response instead of JSON. Meta's webhook verification compares
+    # the echoed hub.challenge byte-for-byte, so it must not be JSON-encoded.
+    text: str | None = None
 
 
 async def _read_body(receive) -> bytes:
@@ -44,12 +49,15 @@ async def _read_body(receive) -> bytes:
     return b"".join(chunks)
 
 
-async def _respond(send, status: int, payload: dict[str, Any]) -> None:
-    data = json.dumps(payload).encode()
+async def _respond(send, status: int, payload: dict[str, Any], text: str | None = None) -> None:
+    if text is not None:
+        data, ctype = text.encode(), b"text/plain; charset=utf-8"
+    else:
+        data, ctype = json.dumps(payload).encode(), b"application/json"
     await send({
         "type": "http.response.start",
         "status": status,
-        "headers": [(b"content-type", b"application/json")],
+        "headers": [(b"content-type", ctype)],
     })
     await send({"type": "http.response.body", "body": data})
 
@@ -67,13 +75,15 @@ def json_endpoint(
         req = Req(
             headers={k.decode().lower(): v.decode() for k, v in scope["headers"]},
             body=await _read_body(receive),
-            query=dict(p.split("=", 1) for p in qs.split("&") if "=" in p),
+            # parse_qsl so %-encoded values (hub.challenge and friends) decode.
+            query=dict(parse_qsl(qs)),
+            method=scope["method"],
         )
         try:
             res = await fn(req)
         except Exception as exc:  # noqa: BLE001 — the outermost boundary
             log_exception("handler_failed", exc)
             res = Resp(500, {"ok": False})
-        await _respond(send, res.status, res.body)
+        await _respond(send, res.status, res.body, res.text)
 
     return app

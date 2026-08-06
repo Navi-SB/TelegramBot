@@ -77,6 +77,18 @@ UNLINK_CANCELLED = "Left connected."
 
 STALE_MENU = "This menu is out of date — send /agents again."
 
+PICK_AGENT = "Which agent should I use?"
+
+PICK_WHICH = "Which one?"
+
+NO_ANSWER = "<i>(no answer)</i>"
+
+APPROVED = "✅ Change approved."
+
+REJECTED = "❌ Change rejected."
+
+ALREADY_RESOLVED = "Already resolved."
+
 NO_AGENTS = (
     "You haven't built any agents yet. Create one at "
     "<a href=\"https://tropishq.com/agent-studio\">Agent Studio</a>, "
@@ -112,3 +124,22 @@ def status(account: str, agent: str | None, turns: int) -> str:
 def agent_error(error_class: str) -> str:
     # The exception CLASS only — messages can carry paths, SQL or key material.
     return f"❌ The agent hit an error (<code>{error_class}</code>). Try rephrasing, or /new."
+
+
+def no_agent_match(query: str) -> str:
+    import html as _h
+
+    return f"No agent matches <b>{_h.escape(query, quote=False)}</b>. Try /agents."
+
+
+def confirm_failed(detail: str) -> str:
+    # The 409 detail is a server-authored sentence about the user's own data
+    # ("Vessel 'X' not found.") — safe to show, and actionable.
+    import html as _h
+
+    d = _h.escape(detail[:200], quote=False) if detail else ""
+    tail = f"\n<code>{d}</code>" if d else ""
+    return (
+        "⚠️ That change couldn't be applied — the data may have changed "
+        "underneath it. It's still pending; review it in the web app." + tail
+    )

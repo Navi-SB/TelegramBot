@@ -24,7 +24,7 @@ async def handle(req):
     # Authenticity first, constant-time, before parsing anything. No detail in
     # the body — a prober learns nothing from the response.
     presented = req.headers.get("x-telegram-bot-api-secret-token", "")
-    if not hmac.compare_digest(presented, cfg.webhook_secret):
+    if not hmac.compare_digest(presented.encode(), cfg.webhook_secret.encode()):
         log("webhook_bad_secret")
         return Resp(401, {"ok": False})
 
