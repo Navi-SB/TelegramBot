@@ -262,26 +262,31 @@ async def _callback(ctx, tg, api) -> None:
             await tg.send_safe(ctx.chat_id, S.UNLINK_CANCELLED)
 
 
+def _is_already_resolved(detail: Any) -> bool:
+    """A 409 from /api/bot/confirm is NOT always a double tap. apply_pending
+    raises for 'is approved, not pending' (double tap — success) but also for
+    real apply failures ('Vessel X not found.') where the row was handed back
+    and is retryable. Reading every 409 as success masked those entirely."""
+    d = str(detail or "").lower()
+    return "already" in d or "not pending" in d
+
+
 async def _confirm(ctx, tg, api, args: list[str]) -> None:
     if len(args) < 2:
         return
     decision, pending_id = args[0], args[1]
-    # Strip the keyboard first so a second tap has nothing to hit. The real
-    # guard is the database, but this removes the common case.
-    if ctx.callback_id:
-        try:
-            msg_id = None  # set below when available
-        except Exception:
-            msg_id = None
     action = "approve" if decision == "y" else "reject"
     try:
         await api.confirm(ctx.chat_id, pending_id, action)
         await tg.send_safe(ctx.chat_id, "✅ Change approved." if action == "approve"
                            else "❌ Change rejected.")
     except PlatformError as exc:
-        if exc.status == 409:
-            # Already resolved — a double tap. Success, not an error.
+        if exc.status == 409 and _is_already_resolved(exc.detail):
+            # A double tap. Success, not an error.
             await tg.send_safe(ctx.chat_id, "Already resolved.")
+        elif exc.status == 409:
+            log("confirm_apply_failed", chat_id=ctx.chat_id, status=exc.status)
+            await tg.send_safe(ctx.chat_id, S.confirm_failed(str(exc.detail or "")))
         else:
             raise
 
@@ -343,11 +348,59 @@ def _esc(text: str) -> str:
     return esc(text)
 
 
+def _payload_lines(payload: dict[str, Any]) -> list[str]:
+    """Flatten one before/after payload into readable lines.
+
+    Fixture tools send {"count": N, "fixtures": [...]}; vessel tools send the
+    record itself. Nulls and empties are noise on a phone screen — dropped.
+    """
+    fixtures = payload.get("fixtures")
+    if isinstance(fixtures, list):
+        lines = []
+        for f in fixtures[:8]:
+            if isinstance(f, dict):
+                kv = ", ".join(f"{k}: {v}" for k, v in f.items() if v not in (None, ""))
+                lines.append(f"• {kv[:200]}")
+            else:
+                lines.append(f"• {str(f)[:200]}")
+        if len(fixtures) > 8:
+            lines.append(f"… and {len(fixtures) - 8} more")
+        return lines
+    return [f"{k}: {v}" for k, v in payload.items() if v not in (None, "")][:15]
+
+
+def _diff_lines(pending: dict[str, Any]) -> list[str]:
+    """What is actually about to change, from the shapes the server sends:
+    {before, after, changed} — there is no 'summary' key. The previous card
+    looked for one, fell back to the tool name, and rendered every real diff
+    as the tool name printed twice."""
+    diff = pending.get("diff") or {}
+    if diff.get("summary"):  # honoured if a future server ever sends one
+        return [str(diff["summary"])]
+
+    before, after, changed = diff.get("before"), diff.get("after"), diff.get("changed")
+    if isinstance(changed, dict) and changed:
+        return [
+            f"{k}: {v.get('from')} → {v.get('to')}" if isinstance(v, dict) else f"{k}: {v}"
+            for k, v in changed.items()
+        ]
+    if before is None and isinstance(after, dict):
+        count = after.get("count")
+        head = f"Adding {count} item(s):" if count else "Adding:"
+        return [head] + _payload_lines(after)
+    if after is None and isinstance(before, dict):
+        count = before.get("count")
+        head = f"Removing {count} item(s):" if count else "Removing:"
+        return [head] + _payload_lines(before)
+    if isinstance(after, dict):
+        return _payload_lines(after)
+    return [str(pending.get("tool", "change"))]
+
+
 def _diff_card(pending: dict[str, Any]) -> str:
     diff = pending.get("diff") or {}
-    summary = diff.get("summary") or pending.get("tool", "change")
-    lines = [f"⚠️ <b>Confirm write</b> — <code>{_esc(pending.get('tool',''))}</code>", "",
-             _esc(str(summary))]
+    lines = [f"⚠️ <b>Confirm write</b> — <code>{_esc(pending.get('tool',''))}</code>", ""]
+    lines += [_esc(line) for line in _diff_lines(pending)]
     if diff.get("warning"):
         lines += ["", f"🚨 {_esc(str(diff['warning']))}"]
     body = "\n".join(lines)

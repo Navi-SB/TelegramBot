@@ -112,3 +112,16 @@ def status(account: str, agent: str | None, turns: int) -> str:
 def agent_error(error_class: str) -> str:
     # The exception CLASS only — messages can carry paths, SQL or key material.
     return f"❌ The agent hit an error (<code>{error_class}</code>). Try rephrasing, or /new."
+
+
+def confirm_failed(detail: str) -> str:
+    # The 409 detail is a server-authored sentence about the user's own data
+    # ("Vessel 'X' not found.") — safe to show, and actionable.
+    import html as _h
+
+    d = _h.escape(detail[:200], quote=False) if detail else ""
+    tail = f"\n<code>{d}</code>" if d else ""
+    return (
+        "⚠️ That change couldn't be applied — the data may have changed "
+        "underneath it. It's still pending; review it in the web app." + tail
+    )

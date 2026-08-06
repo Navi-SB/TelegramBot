@@ -166,3 +166,89 @@ async def test_a_failed_confirm_card_does_not_take_the_others_down():
     tg = FlakyTg(fail_sends={2})
     await handle_update(msg("log these"), tg, api, turn_timeout=30)
     assert len(tg.keyboards) == 1  # p2's buttons still went out
+
+
+# ---------------------------------------------------------------------------
+# the confirm card must show WHAT is about to change
+# ---------------------------------------------------------------------------
+from bot.dispatch import _diff_card  # noqa: E402
+from bot.platform.client import PlatformError  # noqa: E402
+from bot.telegram.keyboards import encode  # noqa: E402
+from tests.test_dispatch import cb  # noqa: E402
+
+
+def test_an_update_diff_shows_field_from_to():
+    card = _diff_card({"pending_id": "p1", "tool": "update_vessel",
+                       "diff": {"before": {"dwt": 82000}, "after": {"dwt": 81000},
+                                "changed": {"dwt": {"from": 82000, "to": 81000}}}})
+    assert "dwt: 82000 → 81000" in card
+    assert card.count("update_vessel") == 1  # the tool name, once, in the header
+
+
+def test_an_add_vessel_diff_lists_the_new_record():
+    card = _diff_card({"pending_id": "p1", "tool": "add_vessel",
+                       "diff": {"before": None,
+                                "after": {"name": "MV OCEAN STAR", "dwt": 82000,
+                                          "draft": None}}})
+    assert "name: MV OCEAN STAR" in card
+    assert "dwt: 82000" in card
+    assert "draft" not in card  # nulls are noise on a phone
+
+
+def test_an_add_fixtures_diff_shows_count_and_rows():
+    card = _diff_card({"pending_id": "p1", "tool": "add_fixtures",
+                       "diff": {"before": None,
+                                "after": {"count": 2, "fixtures": [
+                                    {"vessel": "MV A", "rate": 14.5},
+                                    {"vessel": "MV B", "rate": 12.0}]}}})
+    assert "Adding 2 item(s):" in card
+    assert "vessel: MV A" in card and "vessel: MV B" in card
+    assert card.count("add_fixtures") == 1
+
+
+def test_a_remove_fixtures_diff_says_what_goes():
+    card = _diff_card({"pending_id": "p1", "tool": "remove_fixtures",
+                       "diff": {"before": {"count": 1, "fixtures": [{"vessel": "MV A"}]},
+                                "after": None}})
+    assert "Removing 1 item(s):" in card
+    assert "vessel: MV A" in card
+
+
+def test_a_diff_warning_is_surfaced():
+    card = _diff_card({"pending_id": "p1", "tool": "set_columns",
+                       "diff": {"before": None, "after": {"cols": "x"},
+                                "warning": "This clears 3 saved charts."}})
+    assert "🚨" in card and "This clears 3 saved charts." in card
+
+
+# ---------------------------------------------------------------------------
+# a 409 is only a double tap when the server SAYS so
+# ---------------------------------------------------------------------------
+class Api409(FakeApi):
+    def __init__(self, detail):
+        super().__init__()
+        self._detail = detail
+
+    async def confirm(self, chat_id, pending_id, action):
+        raise PlatformError(409, self._detail)
+
+
+@pytest.mark.asyncio
+async def test_a_real_apply_failure_is_not_reported_as_already_resolved():
+    """apply_pending hands the row back and raises for 'Vessel X not found.' —
+    a retryable failure the user must hear about, not a double tap."""
+    tg = FakeTg()
+    await handle_update(cb(encode("w", "y", "p1")), tg,
+                        Api409("Vessel 'MV GHOST' not found."), turn_timeout=30)
+    assert "Already resolved" not in tg.all_text
+    assert "couldn't be applied" in tg.all_text
+    assert "MV GHOST" in tg.all_text  # the server's sentence, shown
+
+
+@pytest.mark.asyncio
+async def test_a_status_conflict_409_still_reads_as_success():
+    tg = FakeTg()
+    await handle_update(cb(encode("w", "y", "p1")), tg,
+                        Api409("Pending write p1 is approved, not pending."),
+                        turn_timeout=30)
+    assert "Already resolved" in tg.all_text
