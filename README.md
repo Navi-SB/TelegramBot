@@ -146,3 +146,73 @@ the user receives nothing at all.
 templates, tool arguments, pairing codes or tokens. Telegram already stores
 chat content; Vercel's logs would be a second copy of commercially sensitive
 fixture data in a third-party system, and that one is avoidable.
+
+## WhatsApp (Meta Cloud API)
+
+The same core now serves WhatsApp: `bot/core/dispatch.py` holds every flow
+once, `bot/telegram/` and `bot/whatsapp/` adapt it per channel, and one Vercel
+project answers both webhooks. The backend was channel-agnostic from day one —
+`channel='whatsapp'` rides the same `/api/bot/*` surface and tables.
+
+What differs from Telegram, by design:
+
+| | Telegram | WhatsApp |
+|---|---|---|
+| Pairing | `t.me/...?start=<code>` deep link | `wa.me/<number>?text=LINK <code>` prefill — the user must press Send |
+| Commands | `/commands` menu | bare words (`agents`, `new`, `status`, `unlink`, `help`); `/forms` still accepted; multi-word text is never swallowed |
+| Progress | "⏳ Thinking…" edited into the answer | read receipt + typing indicator, then buffered sends (no edit API exists) |
+| Menus | inline keyboards, 8/page | list message, 10-row ceiling: 7 agents + Full text + nav |
+| Confirm cards | ≤3500 chars under the keyboard | ≤950 chars (interactive body caps at 1024) |
+| Blocked | inbound `my_chat_member` | error 131026 on a send → `mark_blocked`, once |
+| Dedupe key | `update_id` | per-message `wamid` (one POST can batch several) |
+| Dev loop | `scripts/dev_poll.py` | webhook-only — use the dashboard test number + a tunnel (no polling exists) |
+
+Because the bot only ever replies inside the 24-hour service window, no paid
+message templates are needed for any flow. (Meta ends free service messages on
+2026-10-01 — per-message rates land by 2026-09-01; that changes cost, not code.)
+
+### WhatsApp setup, in order
+
+1. **Start Business Verification immediately** (business.facebook.com — takes
+   3–10 days and gates only production; everything below works on the free
+   test number meanwhile).
+2. developers.facebook.com → create a **Business** app → add the WhatsApp
+   product. Note the test **phone number id** and **WABA id**; add up to 5
+   SMS-verified recipient numbers.
+3. Business Settings → System User (admin) → assign the app + WABA → generate
+   a **permanent token** with `whatsapp_business_messaging` and
+   `whatsapp_business_management` → `WHATSAPP_ACCESS_TOKEN`. App Settings →
+   Basic → App Secret → `WHATSAPP_APP_SECRET`. Mint `WHATSAPP_VERIFY_TOKEN`
+   yourself (`secrets.token_urlsafe(32)`).
+4. Set the `WHATSAPP_*` vars in Vercel (see `.env.example`) and deploy; check
+   `/api/health`.
+5. Dashboard → WhatsApp → Configuration → Webhook:
+   URL `https://tgbot.tropishq.com/api/whatsapp`, your verify token →
+   Verify and save → subscribe to the **`messages`** field only. Then
+   `python scripts/wa_subscribe.py`.
+6. Smoke: text the bot number from a verified recipient phone, or
+   `python scripts/wa_send_test.py <number>` after messaging it first.
+7. Backend: set `WHATSAPP_BOT_NUMBER` on the VPS so `mint_link_code` can build
+   the `wa.me` link, and add the frontend Connect WhatsApp card (VoyageCalc
+   repo — see NAV-36).
+8. Production, after verification passes: dedicated SIM never used on consumer
+   WhatsApp → register the number (6-digit PIN) → display name "Tropis" →
+   swap `WHATSAPP_PHONE_NUMBER_ID` + set `WHATSAPP_PROD_PHONE_NUMBER_ID` so
+   previews refuse the prod number. Keep the test number + a second dev Meta
+   app pointed at a tunnel as the dev loop.
+
+### WhatsApp things that will bite you
+
+- **Statuses ride the same webhook field.** Three receipts arrive per outbound
+  message and cannot be unsubscribed — `api/whatsapp.py` filters them before
+  they wake a worker. Don't "fix" that filter away.
+- **Meta re-delivers for up to 36h** and batches messages: the worker claims
+  each wamid separately, so a redelivered batch replays only what didn't
+  finish.
+- **The typing indicator lasts ~25s**; a 30–90s turn goes visually quiet after
+  that. Known trade-off — there is no edit API to stream into.
+- **`hub.challenge` must echo as plain text**, not JSON — that's why
+  `Resp(text=...)` exists in `bot/asgi.py`.
+- **Business-specific assistants are allowed** under Meta's 2026 AI policy;
+  general-purpose ones are not. Keep the display name and copy "Tropis
+  assistant", never "chat with an AI".
