@@ -184,7 +184,10 @@ def _wrap(text: str, size: int) -> list[str]:
         if cut <= 0:
             cut = size
         out.append(text[:cut])
-        text = text[cut:].lstrip("\n")
+        # Keep the separator. Stripping it here welded the two halves together
+        # whenever both pieces landed in the same message — a CSV row boundary
+        # would vanish: 39 rows in, 38 rows out, no visible trace.
+        text = text[cut:]
     if text:
         out.append(text)
     return out
