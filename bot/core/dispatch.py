@@ -37,6 +37,11 @@ class Inbound:
     is_unsupported_media: bool
     is_private: bool = True
     blocked: bool = False         # Telegram-only; WhatsApp learns it send-side
+    log_ref: str = ""             # what logs show for this chat; never a phone number
+
+    def __post_init__(self):
+        if not self.log_ref:
+            self.log_ref = self.chat_id
 
 
 class Progress:
@@ -47,8 +52,9 @@ class Progress:
     (and optionally _send_first, e.g. to edit a placeholder).
     """
 
-    def __init__(self, chat_id: str):
+    def __init__(self, chat_id: str, log_ref: str | None = None):
         self.chat_id = chat_id
+        self.log_ref = log_ref or chat_id
         self.delivered = 0
         self._first = True
 
@@ -65,14 +71,14 @@ class Progress:
                     await self._send_first(chunk)
                 except Exception as exc:  # noqa: BLE001
                     # The edit failing must not eat the answer — send it plain.
-                    log_exception("placeholder_edit_failed", exc, chat_id=self.chat_id)
+                    log_exception("placeholder_edit_failed", exc, chat_id=self.log_ref)
                     await self._send(chunk)
             else:
                 await self._send(chunk)
             self.delivered += 1
             return True
         except Exception as exc:  # noqa: BLE001 — isolate per message
-            log_exception("chunk_send_failed", exc, chat_id=self.chat_id)
+            log_exception("chunk_send_failed", exc, chat_id=self.log_ref)
             return False
         finally:
             self._first = False
@@ -90,7 +96,7 @@ class Channel(Protocol):
     ) -> None: ...
     async def send_unlink_confirm(self, chat_id: str) -> None: ...
     async def send_confirm_write(self, chat_id: str, pending: dict[str, Any]) -> None: ...
-    async def begin_progress(self, chat_id: str) -> Progress: ...
+    async def begin_progress(self, ctx: "Inbound") -> Progress: ...
     def format_markdown(self, md: str) -> list[str]: ...
     def format_verbatim(self, text: str) -> list[str]: ...
 
@@ -122,7 +128,7 @@ async def handle_inbound(
     try:
         link = await api.get_link(ctx.chat_id)
     except PlatformUnavailable as exc:
-        log_exception("platform_down", exc, chat_id=ctx.chat_id)
+        log_exception("platform_down", exc, chat_id=ctx.log_ref)
         await ch.send(ctx.chat_id, S.PLATFORM_DOWN)
         return
 
@@ -142,10 +148,10 @@ async def handle_inbound(
         elif ctx.text:
             await _turn(ctx, ch, api, turn_timeout=turn_timeout)
     except PlatformUnavailable as exc:
-        log_exception("platform_down", exc, chat_id=ctx.chat_id)
+        log_exception("platform_down", exc, chat_id=ctx.log_ref)
         await ch.send(ctx.chat_id, S.PLATFORM_DOWN)
     except Exception as exc:  # noqa: BLE001
-        log_exception("dispatch_failed", exc, chat_id=ctx.chat_id)
+        log_exception("dispatch_failed", exc, chat_id=ctx.log_ref)
         await ch.send(ctx.chat_id, S.UNEXPECTED)
 
 
@@ -156,11 +162,11 @@ async def _redeem(ctx: Inbound, ch: Channel, api: PlatformClient) -> None:
     try:
         res = await api.redeem(ctx.chat_id, ctx.args, ctx.sender_id, ctx.sender_name)
     except PlatformError as exc:
-        log("link_failed", chat_id=ctx.chat_id, status=exc.status)
+        log("link_failed", chat_id=ctx.log_ref, status=exc.status)
         await ch.send(ctx.chat_id, ch.S.LINK_FAILED)
         return
     user = res.get("user") or {}
-    log("linked", chat_id=ctx.chat_id, user_id=user.get("id"))
+    log("linked", chat_id=ctx.log_ref, user_id=user.get("id"))
     await ch.send(ctx.chat_id, ch.S.linked(user.get("name", "your account"), user.get("email", "")))
     await _show_agents(ctx, ch, api)
 
@@ -292,7 +298,7 @@ async def _confirm(ctx, ch, api, args: list[str]) -> None:
             # A double tap. Success, not an error.
             await ch.send(ctx.chat_id, ch.S.ALREADY_RESOLVED)
         elif exc.status == 409:
-            log("confirm_apply_failed", chat_id=ctx.chat_id, status=exc.status)
+            log("confirm_apply_failed", chat_id=ctx.log_ref, status=exc.status)
             await ch.send(ctx.chat_id, ch.S.confirm_failed(str(exc.detail or "")))
         else:
             raise
@@ -302,7 +308,7 @@ async def _confirm(ctx, ch, api, args: list[str]) -> None:
 
 
 async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
-    prog = await ch.begin_progress(ctx.chat_id)
+    prog = await ch.begin_progress(ctx)
 
     try:
         result = await api.turn(ctx.chat_id, ctx.text or "", timeout=turn_timeout)
@@ -341,9 +347,9 @@ async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
         try:
             await ch.send_confirm_write(ctx.chat_id, pending)
         except Exception as exc:  # noqa: BLE001 — one lost card ≠ a lost turn
-            log_exception("confirm_card_send_failed", exc, chat_id=ctx.chat_id)
+            log_exception("confirm_card_send_failed", exc, chat_id=ctx.log_ref)
 
-    log("turn_done", chat_id=ctx.chat_id, tools=result.get("tools_used"),
+    log("turn_done", chat_id=ctx.log_ref, tools=result.get("tools_used"),
         chunks=len(chunks), outcome=result.get("stop_reason"))
 
 
@@ -351,7 +357,7 @@ async def _deliver(prog: Progress, chunks: list[str]) -> int:
     for chunk in chunks:
         await prog.emit(chunk)
     if prog.delivered < len(chunks):
-        log("delivery_incomplete", chat_id=prog.chat_id,
+        log("delivery_incomplete", chat_id=prog.log_ref,
             chunks=f"{prog.delivered}/{len(chunks)}")
     return prog.delivered
 

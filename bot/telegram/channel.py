@@ -101,10 +101,10 @@ class TelegramChannel:
         await self._tg.send_safe(chat_id, diff_card(pending),
                                  reply_markup=confirm_write(pending["pending_id"]))
 
-    async def begin_progress(self, chat_id: str) -> TelegramProgress:
-        await self._tg.send_chat_action(chat_id)
-        placeholder = await self._tg.send_safe(chat_id, S.THINKING)
-        return TelegramProgress(self._tg, chat_id, placeholder)
+    async def begin_progress(self, ctx: Inbound) -> TelegramProgress:
+        await self._tg.send_chat_action(ctx.chat_id)
+        placeholder = await self._tg.send_safe(ctx.chat_id, S.THINKING)
+        return TelegramProgress(self._tg, ctx.chat_id, placeholder)
 
     def format_markdown(self, md: str) -> list[str]:
         return split_html(md_to_html(md))

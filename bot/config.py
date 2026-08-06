@@ -23,12 +23,25 @@ class Config:
     max_duration: int
     vercel_env: str
     vercel_bypass: str | None
+    # WhatsApp (Meta Cloud API) — all optional so a Telegram-only deployment
+    # never fails to start; the WhatsApp endpoints check for what they need.
+    wa_access_token: str | None = None
+    wa_phone_number_id: str | None = None
+    wa_verify_token: str | None = None
+    wa_app_secret: str | None = None
+    wa_waba_id: str | None = None
+    wa_graph_version: str = "v26.0"
 
     @property
     def deadline_seconds(self) -> float:
         """Stop with a message the user can act on, rather than being cut off
         mid-turn by the platform's own timeout."""
         return max(10.0, self.max_duration - 25)
+
+    @property
+    def whatsapp_ready(self) -> bool:
+        return bool(self.wa_access_token and self.wa_phone_number_id
+                    and self.wa_app_secret and self.wa_verify_token)
 
 
 def _load_dotenv() -> None:
@@ -79,6 +92,12 @@ def load() -> Config:
         max_duration=int(os.environ.get("BOT_MAX_DURATION", "290")),
         vercel_env=env,
         vercel_bypass=os.environ.get("VERCEL_AUTOMATION_BYPASS_SECRET") or None,
+        wa_access_token=os.environ.get("WHATSAPP_ACCESS_TOKEN") or None,
+        wa_phone_number_id=os.environ.get("WHATSAPP_PHONE_NUMBER_ID") or None,
+        wa_verify_token=os.environ.get("WHATSAPP_VERIFY_TOKEN") or None,
+        wa_app_secret=os.environ.get("WHATSAPP_APP_SECRET") or None,
+        wa_waba_id=os.environ.get("WHATSAPP_WABA_ID") or None,
+        wa_graph_version=os.environ.get("WHATSAPP_GRAPH_VERSION", "v26.0"),
     )
 
     # A Preview deploy silently stealing the production webhook is a very easy
@@ -89,5 +108,15 @@ def load() -> Config:
         raise ConfigError(
             "This is a non-production deployment holding the PRODUCTION bot "
             "token. Give Preview and Development their own @..._dev_bot."
+        )
+
+    # Same failure mode, WhatsApp shape: webhook config is per-Meta-app, so a
+    # preview can't steal it — but a preview SENDING from the production number
+    # is just as bad. Refuse a non-production deploy holding the prod number.
+    wa_prod = os.environ.get("WHATSAPP_PROD_PHONE_NUMBER_ID", "").strip()
+    if env != "production" and wa_prod and cfg.wa_phone_number_id == wa_prod:
+        raise ConfigError(
+            "This is a non-production deployment holding the PRODUCTION "
+            "WhatsApp number. Give Preview and Development the test number."
         )
     return cfg
