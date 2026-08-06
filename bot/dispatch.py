@@ -296,11 +296,11 @@ async def _turn(ctx, tg, api, *, turn_timeout: float) -> None:
     try:
         result = await api.turn(ctx.chat_id, ctx.text or "", timeout=turn_timeout)
     except PlatformUnavailable:
-        await _replace(tg, ctx.chat_id, placeholder, S.PLATFORM_DOWN)
+        await _deliver(tg, ctx.chat_id, placeholder, [S.PLATFORM_DOWN])
         return
     except PlatformError as exc:
         text = S.TURN_TIMEOUT if exc.status in (504, 0) else S.UNEXPECTED
-        await _replace(tg, ctx.chat_id, placeholder, text)
+        await _deliver(tg, ctx.chat_id, placeholder, [text])
         return
 
     chunks: list[str] = []
@@ -315,9 +315,7 @@ async def _turn(ctx, tg, api, *, turn_timeout: float) -> None:
         # (e.g. bunker prices fetched, then the pool-calc iteration dies).
         # Those are answers the user asked for — ship them, then the error.
         chunks.append(S.agent_error(str(result["error"]).split(":")[0]))
-        await _replace(tg, ctx.chat_id, placeholder, chunks[0])
-        for extra in chunks[1:]:
-            await tg.send_safe(ctx.chat_id, extra)
+        await _deliver(tg, ctx.chat_id, placeholder, chunks)
         return
 
     reply = (result.get("reply") or "").strip()
@@ -326,13 +324,14 @@ async def _turn(ctx, tg, api, *, turn_timeout: float) -> None:
     if not chunks:
         chunks = ["<i>(no answer)</i>"]
 
-    await _replace(tg, ctx.chat_id, placeholder, chunks[0])
-    for extra in chunks[1:]:
-        await tg.send_safe(ctx.chat_id, extra)
+    await _deliver(tg, ctx.chat_id, placeholder, chunks)
 
     for pending in result.get("pending") or []:
-        await tg.send_safe(ctx.chat_id, _diff_card(pending),
-                           reply_markup=confirm_write(pending["pending_id"]))
+        try:
+            await tg.send_safe(ctx.chat_id, _diff_card(pending),
+                               reply_markup=confirm_write(pending["pending_id"]))
+        except Exception as exc:  # noqa: BLE001 — one lost card ≠ a lost turn
+            log_exception("confirm_card_send_failed", exc, chat_id=ctx.chat_id)
 
     log("turn_done", chat_id=ctx.chat_id, tools=result.get("tools_used"),
         chunks=len(chunks), outcome=result.get("stop_reason"))
@@ -365,3 +364,32 @@ async def _replace(tg, chat_id: str, message_id: Optional[int], text: str) -> No
         await tg.edit_message_text(chat_id, message_id, text)
     else:
         await tg.send_safe(chat_id, text)
+
+
+async def _deliver(tg, chat_id: str, placeholder: Optional[int], chunks: list[str]) -> int:
+    """Send every chunk with per-message isolation.
+
+    One failed send must never cost the rest of the answer: without this, a
+    single Telegram error mid-loop truncated a fleet listing, and a failed
+    placeholder edit discarded the whole turn and left "⏳ Thinking…" on
+    screen forever. Returns how many chunks were delivered.
+    """
+    delivered = 0
+    for i, chunk in enumerate(chunks):
+        try:
+            if i == 0 and placeholder:
+                try:
+                    await _replace(tg, chat_id, placeholder, chunk)
+                except Exception as exc:  # noqa: BLE001
+                    # The edit failing must not eat the answer — send it plain.
+                    log_exception("placeholder_edit_failed", exc, chat_id=chat_id)
+                    await tg.send_safe(chat_id, chunk)
+            else:
+                await tg.send_safe(chat_id, chunk)
+            delivered += 1
+        except Exception as exc:  # noqa: BLE001 — isolate per message
+            log_exception("chunk_send_failed", exc, chat_id=chat_id)
+    if delivered < len(chunks):
+        log("delivery_incomplete", chat_id=chat_id,
+            chunks=f"{delivered}/{len(chunks)}")
+    return delivered

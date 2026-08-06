@@ -97,3 +97,72 @@ def test_backtick_and_asterisk_replies_always_produce_nested_tags():
     ]
     for s in samples:
         assert _balanced(md_to_html(s)), s
+
+
+# ---------------------------------------------------------------------------
+# delivery: one failed send must never cost the rest of the answer
+# ---------------------------------------------------------------------------
+from bot.dispatch import handle_update  # noqa: E402
+from bot.telegram.api import TelegramError  # noqa: E402
+from tests.test_dispatch import FakeApi, FakeTg, msg  # noqa: E402
+
+
+class FlakyTg(FakeTg):
+    """FakeTg where chosen send_safe calls (1-indexed) or every edit fail."""
+
+    def __init__(self, *, fail_sends=(), fail_edits=False):
+        super().__init__()
+        self._send_calls = 0
+        self._fail_sends = set(fail_sends)
+        self._fail_edits = fail_edits
+
+    async def send_safe(self, chat_id, text, *, reply_markup=None):
+        self._send_calls += 1
+        if self._send_calls in self._fail_sends:
+            raise TelegramError(400, "Bad Request: chat temporarily unavailable")
+        return await super().send_safe(chat_id, text, reply_markup=reply_markup)
+
+    async def edit_message_text(self, chat_id, message_id, text, **kw):
+        if self._fail_edits:
+            raise TelegramError(400, "Bad Request: message to edit not found")
+        await super().edit_message_text(chat_id, message_id, text, **kw)
+
+
+def _turn_result(**over):
+    base = {"reply": "", "vessel_outputs": [], "pending": [], "tools_used": [],
+            "stop_reason": "end_turn", "error": None}
+    return {**base, **over}
+
+
+@pytest.mark.asyncio
+async def test_one_failed_send_does_not_truncate_the_fleet_listing():
+    api = FakeApi(turn=_turn_result(vessel_outputs=["OUT-ONE", "OUT-TWO", "OUT-THREE"]))
+    # send #1 is the placeholder; OUT-ONE replaces it via edit;
+    # OUT-TWO is send #2 — make exactly that one fail.
+    tg = FlakyTg(fail_sends={2})
+    await handle_update(msg("fleet list"), tg, api, turn_timeout=30)
+    assert "OUT-ONE" in tg.all_text
+    assert "OUT-TWO" not in tg.all_text  # lost to the (logged) error
+    assert "OUT-THREE" in tg.all_text   # but the rest still arrived
+
+
+@pytest.mark.asyncio
+async def test_a_failed_placeholder_edit_does_not_discard_the_turn():
+    """The old behaviour: the edit raised, handle_update's boundary swallowed
+    the turn, and '⏳ Thinking…' sat on screen forever."""
+    api = FakeApi(turn=_turn_result(reply="You have 12 Panamaxes."))
+    tg = FlakyTg(fail_edits=True)
+    await handle_update(msg("how many?"), tg, api, turn_timeout=30)
+    assert any("12 Panamaxes" in t for _, t in tg.sent)  # arrived as a plain send
+
+
+@pytest.mark.asyncio
+async def test_a_failed_confirm_card_does_not_take_the_others_down():
+    api = FakeApi(turn=_turn_result(
+        reply="done",
+        pending=[{"pending_id": "p1", "tool": "add_fixtures", "diff": {}},
+                 {"pending_id": "p2", "tool": "add_fixtures", "diff": {}}]))
+    # sends: #1 placeholder, reply edits it; card p1 is send #2 — fail it.
+    tg = FlakyTg(fail_sends={2})
+    await handle_update(msg("log these"), tg, api, turn_timeout=30)
+    assert len(tg.keyboards) == 1  # p2's buttons still went out
