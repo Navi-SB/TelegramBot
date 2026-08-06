@@ -25,6 +25,7 @@ HELP = (
     "<b>Tropis assistant</b>\n\n"
     "Just send a message to talk to your agent.\n\n"
     "/agents — pick which of your agents to talk to\n"
+    "/short — turn a pasted vessel description into a broker short description\n"
     "/new — start a fresh conversation with the current agent\n"
     "/status — what I'm connected to\n"
     "/unlink — disconnect this chat\n"
@@ -81,6 +82,13 @@ PICK_AGENT = "Which agent should I use?"
 
 PICK_WHICH = "Which one?"
 
+PICK_FORMAT = "Which short-description format?"
+
+TOOLS_UNAVAILABLE = (
+    "Short descriptions aren't available here yet — the platform needs an "
+    "update first."
+)
+
 NO_ANSWER = "<i>(no answer)</i>"
 
 APPROVED = "✅ Change approved."
@@ -124,6 +132,14 @@ def status(account: str, agent: str | None, turns: int) -> str:
 def agent_error(error_class: str) -> str:
     # The exception CLASS only — messages can carry paths, SQL or key material.
     return f"❌ The agent hit an error (<code>{error_class}</code>). Try rephrasing, or /new."
+
+
+def tool_selected(name: str) -> str:
+    return (
+        f"📝 <b>{name}</b> — paste a full vessel description or fixture recap "
+        "and I'll return the compact broker line, ready to forward.\n"
+        "Back to your agents with /agents."
+    )
 
 
 def no_agent_match(query: str) -> str:

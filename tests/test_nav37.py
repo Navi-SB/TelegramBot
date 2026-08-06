@@ -286,19 +286,24 @@ async def test_agent_no_match_escapes_the_query():
 
 
 @pytest.mark.asyncio
-async def test_the_shortdesc_tool_selects_from_the_telegram_picker():
-    """Same sentinel flow on Telegram: colon-heavy tool ids ride the ref codec
-    through the inline keyboard."""
-    from bot.telegram.keyboards import agent_picker
-    from bot.core.codec import ref
+async def test_short_opens_the_format_picker_on_telegram():
+    """/short shows only the formats — no 'Full text' row — and selection
+    rides the same ref codec (colon-heavy sentinel ids are what it's for)."""
+    class ToolsApi(FakeApi):
+        async def agents(self, chat_id):
+            res = await super().agents(chat_id)
+            return {**res, "tools": [{"id": "tool:shortdesc:geared",
+                                      "name": "Short desc · Geared",
+                                      "kind": "tool"}]}
 
-    api = FakeApi(agents=[{"id": "tool:shortdesc:geared",
-                           "name": "Short desc · Geared", "kind": "tool"}])
+    api = ToolsApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
     tg = FakeTg()
-    await handle_update(msg("/agents"), tg, api, turn_timeout=30)
+    await handle_update(msg("/short"), tg, api, turn_timeout=30)
     buttons = [b for row in tg.keyboards[0]["inline_keyboard"] for b in row]
-    target = next(b for b in buttons if b["text"] == "Short desc · Geared")
-    assert len(target["callback_data"].encode()) <= 64
+    texts = [b["text"] for b in buttons]
+    assert texts == ["Short desc · Geared"]  # no Full text, no agents
+    assert len(buttons[0]["callback_data"].encode()) <= 64
 
-    await handle_update(cb(target["callback_data"]), tg, api, turn_timeout=30)
+    await handle_update(cb(buttons[0]["callback_data"]), tg, api, turn_timeout=30)
     assert api.selected == "tool:shortdesc:geared"
+    assert "paste a full vessel description" in tg.all_text.lower()

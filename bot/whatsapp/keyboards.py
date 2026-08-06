@@ -15,7 +15,11 @@ from ..core.codec import encode, ref
 PER_PAGE = 7
 
 
-def picker_rows(agents: list[dict[str, Any]], page: int = 0) -> list[dict[str, str]]:
+def picker_rows(
+    agents: list[dict[str, Any]], page: int = 0, *, extras: bool = True
+) -> list[dict[str, str]]:
+    """extras=False drops the "Full text" row — the /short format picker is
+    a mode chooser, not an agent list."""
     start = page * PER_PAGE
     window = agents[start:start + PER_PAGE]
     rows = []
@@ -26,8 +30,9 @@ def picker_rows(agents: list[dict[str, Any]], page: int = 0) -> list[dict[str, s
         if desc:
             row["description"] = str(desc)[:72]
         rows.append(row)
-    rows.append({"id": encode("a", "-"), "title": "📄 Full text",
-                 "description": "No agent formatting"})
+    if extras:
+        rows.append({"id": encode("a", "-"), "title": "📄 Full text",
+                     "description": "No agent formatting"})
     if page > 0:
         rows.append({"id": encode("ap", str(page - 1)), "title": "‹ Previous agents"})
     if start + PER_PAGE < len(agents):

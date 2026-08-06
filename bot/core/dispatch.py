@@ -101,7 +101,8 @@ class Channel(Protocol):
     async def ack(self, ctx: Inbound) -> None: ...
     async def send(self, chat_id: str, text: str) -> None: ...
     async def send_agent_picker(
-        self, chat_id: str, agents: list[dict[str, Any]], page: int, title: str
+        self, chat_id: str, agents: list[dict[str, Any]], page: int, title: str,
+        *, extras: bool = True,
     ) -> None: ...
     async def send_unlink_confirm(self, chat_id: str) -> None: ...
     async def send_confirm_write(self, chat_id: str, pending: dict[str, Any]) -> None: ...
@@ -199,6 +200,8 @@ async def _command(ctx, ch, api, link, *, turn_timeout: float) -> None:
         await _status(ctx, ch, api, link)
     elif cmd == "unlink":
         await ch.send_unlink_confirm(ctx.chat_id)
+    elif cmd in ("short", "shortdesc", "shortdescr"):
+        await _show_tools(ctx, ch, api)
     else:
         await ch.send(ctx.chat_id, ch.S.HELP)
 
@@ -223,6 +226,29 @@ async def _show_agents(ctx, ch, api, page: int = 0) -> None:
     await ch.send_agent_picker(ctx.chat_id, agents, page, ch.S.PICK_AGENT)
 
 
+async def _show_tools(ctx, ch, api) -> None:
+    """/short — the Short Description Generator's format picker.
+
+    The formats come from the platform's `tools` key, deliberately separate
+    from the user's agents: /agents stays agents-only, and a new format never
+    needs a bot deploy. An older platform without the key gets a plain
+    "not available yet" rather than an empty menu."""
+    res = await api.agents(ctx.chat_id)
+    tools = res.get("tools") or []
+    if not tools:
+        await ch.send(ctx.chat_id, ch.S.TOOLS_UNAVAILABLE)
+        return
+    wanted = ctx.args.strip().lower()
+    if wanted:
+        hits = [t for t in tools
+                if wanted in t["name"].lower() or t["id"].rsplit(":", 1)[-1] == wanted]
+        if len(hits) == 1:
+            await _select(ctx, ch, api, hits[0]["id"])
+            return
+        tools = hits or tools
+    await ch.send_agent_picker(ctx.chat_id, tools, 0, ch.S.PICK_FORMAT, extras=False)
+
+
 async def _select_by_name(ctx, ch, api) -> None:
     wanted = ctx.args.strip().lower()
     agents = (await api.agents(ctx.chat_id)).get("agents", [])
@@ -245,8 +271,14 @@ async def _select(ctx, ch, api, preset_id: Optional[str]) -> None:
     if not preset_id:
         await ch.send(ctx.chat_id, ch.S.FULL_TEXT_SELECTED)
         return
+    name = session.get("preset_name") or "your agent"
+    if preset_id.startswith("tool:"):
+        # A generator mode, not a conversation — say what to paste next
+        # instead of announcing thread state.
+        await ch.send(ctx.chat_id, ch.S.tool_selected(name))
+        return
     await ch.send(ctx.chat_id, ch.S.agent_selected(
-        session.get("preset_name") or "your agent",
+        name,
         session.get("turns", 0),
         session.get("rotated", False),
     ))
@@ -268,8 +300,9 @@ async def _callback(ctx, ch, api) -> None:
         if wanted_ref == "-":
             await _select(ctx, ch, api, None)
             return
-        agents = (await api.agents(ctx.chat_id)).get("agents", [])
-        match = next((a for a in agents if ref(a["id"]) == wanted_ref), None)
+        res = await api.agents(ctx.chat_id)
+        pool = (res.get("agents") or []) + (res.get("tools") or [])
+        match = next((a for a in pool if ref(a["id"]) == wanted_ref), None)
         if match is None:
             await ch.send(ctx.chat_id, ch.S.STALE_MENU)
             return

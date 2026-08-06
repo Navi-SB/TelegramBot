@@ -90,9 +90,11 @@ class TelegramChannel:
         await self._tg.send_safe(chat_id, text)
 
     async def send_agent_picker(
-        self, chat_id: str, agents: list[dict[str, Any]], page: int, title: str
+        self, chat_id: str, agents: list[dict[str, Any]], page: int, title: str,
+        *, extras: bool = True,
     ) -> None:
-        await self._tg.send_safe(chat_id, title, reply_markup=agent_picker(agents, page))
+        await self._tg.send_safe(chat_id, title,
+                                 reply_markup=agent_picker(agents, page, extras=extras))
 
     async def send_unlink_confirm(self, chat_id: str) -> None:
         await self._tg.send_safe(chat_id, S.UNLINK_CONFIRM, reply_markup=confirm_unlink())

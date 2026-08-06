@@ -19,7 +19,8 @@ from ..core.dispatch import Inbound
 from ..logging import log
 from .render import log_ref
 
-_BARE_WORDS = {"agents", "new", "status", "unlink", "help", "menu"}
+_BARE_WORDS = {"agents", "new", "status", "unlink", "help", "menu",
+               "short", "shortdesc", "shortdescr"}
 # "unsupported" is deliberately in MEDIA, not IGNORED: the user actively sent
 # something (a poll, view-once media) and must hear that the bot is text-only.
 _MEDIA_TYPES = {

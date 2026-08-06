@@ -290,24 +290,62 @@ async def test_a_first_chunk_failure_is_not_sent_twice():
 
 
 # ---------------------------------------------------------------------------
-# the Short Description Generator rides the picker as a tool:* sentinel
+# /short — the Short Description Generator's own command
 # ---------------------------------------------------------------------------
-SHORTDESC = {"id": "tool:shortdesc:geared", "name": "Short desc · Geared", "kind": "tool"}
+TOOLS = [
+    {"id": "tool:shortdesc:geared", "name": "Short desc · Geared", "kind": "tool"},
+    {"id": "tool:shortdesc:pmx", "name": "Short desc · PMX", "kind": "tool"},
+]
+
+
+class ToolsApi(FakeApi):
+    def __init__(self, tools=None, **kw):
+        super().__init__(**kw)
+        self._tools = TOOLS if tools is None else tools
+
+    async def agents(self, chat_id):
+        res = await super().agents(chat_id)
+        return {**res, "tools": self._tools}
 
 
 @pytest.mark.asyncio
-async def test_the_shortdesc_tool_appears_in_the_picker_and_selects_by_ref():
-    """The sentinel id carries two colons — exactly what the ref codec exists
-    for. The row title is ≤24 chars so WhatsApp never truncates it."""
-    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"},
-                          SHORTDESC])
-    wa = await run(text_msg("agents"), api)
+async def test_short_opens_the_format_picker_without_agent_extras():
+    """/short is a mode chooser: only the formats — no user agents, no
+    'Full text' row. The sentinel ids carry colons — what ref() exists for."""
+    api = ToolsApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    wa = await run(text_msg("short"), api)
     _, _, rows = wa.lists[0]
-    row = next(r for r in rows if r["title"] == "Short desc · Geared")
-    assert len(row["title"]) <= 24
+    titles = [r["title"] for r in rows]
+    assert titles == ["Short desc · Geared", "Short desc · PMX"]
+    assert all("Full text" not in t and "Freight" not in t for t in titles)
 
+    row = next(r for r in rows if r["title"] == "Short desc · Geared")
     await run(interactive("list_reply", row["id"]), api)
     assert api.selected == "tool:shortdesc:geared"
+
+
+@pytest.mark.asyncio
+async def test_agents_no_longer_lists_the_generator():
+    api = ToolsApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    wa = await run(text_msg("agents"), api)
+    _, _, rows = wa.lists[0]
+    assert all("Short desc" not in r["title"] for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_short_with_a_format_arg_selects_directly():
+    api = ToolsApi()
+    wa = await run(text_msg("/short pmx"), api)
+    assert api.selected == "tool:shortdesc:pmx"
+    assert "paste a full vessel description" in wa.all_text.lower()
+
+
+@pytest.mark.asyncio
+async def test_short_against_an_old_platform_says_so():
+    """No `tools` key (backend not updated yet) → a plain message, never an
+    empty menu."""
+    wa = await run(text_msg("short"), FakeApi())
+    assert S.TOOLS_UNAVAILABLE in wa.all_text
 
 
 @pytest.mark.asyncio
