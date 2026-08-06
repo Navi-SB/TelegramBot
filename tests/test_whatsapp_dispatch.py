@@ -287,3 +287,34 @@ async def test_a_first_chunk_failure_is_not_sent_twice():
     api = FakeApi(turn=turn_result(reply="one-chunk answer"))
     await run(text_msg("q"), api, wa=FlakyWa())
     assert attempts.count(attempts[0]) == 1  # one attempt per chunk, no retry-send
+
+
+# ---------------------------------------------------------------------------
+# the Short Description Generator rides the picker as a tool:* sentinel
+# ---------------------------------------------------------------------------
+SHORTDESC = {"id": "tool:shortdesc:geared", "name": "Short desc · Geared", "kind": "tool"}
+
+
+@pytest.mark.asyncio
+async def test_the_shortdesc_tool_appears_in_the_picker_and_selects_by_ref():
+    """The sentinel id carries two colons — exactly what the ref codec exists
+    for. The row title is ≤24 chars so WhatsApp never truncates it."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"},
+                          SHORTDESC])
+    wa = await run(text_msg("agents"), api)
+    _, _, rows = wa.lists[0]
+    row = next(r for r in rows if r["title"] == "Short desc · Geared")
+    assert len(row["title"]) <= 24
+
+    await run(interactive("list_reply", row["id"]), api)
+    assert api.selected == "tool:shortdesc:geared"
+
+
+@pytest.mark.asyncio
+async def test_a_short_description_turn_arrives_verbatim_and_unfenced():
+    """The backend returns the generated line as vessel_outputs — the one
+    channel-side guarantee that matters is byte-for-byte delivery."""
+    rendered = "MV TEST dwt/24(yard)\nDWT 63,000 on 13.2m\nTPC 55/GR 77,000 CBM"
+    api = FakeApi(turn=turn_result(vessel_outputs=[rendered]))
+    wa = await run(text_msg("Supramax 63k built 2024 ..."), api)
+    assert wa.texts[0][1] == rendered

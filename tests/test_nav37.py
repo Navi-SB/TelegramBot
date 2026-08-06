@@ -283,3 +283,22 @@ async def test_agent_no_match_escapes_the_query():
     tg = FakeTg()
     await handle_update(msg("/agent <handysize>"), tg, api, turn_timeout=30)
     assert "No agent matches <b>&lt;handysize&gt;</b>." in tg.all_text
+
+
+@pytest.mark.asyncio
+async def test_the_shortdesc_tool_selects_from_the_telegram_picker():
+    """Same sentinel flow on Telegram: colon-heavy tool ids ride the ref codec
+    through the inline keyboard."""
+    from bot.telegram.keyboards import agent_picker
+    from bot.core.codec import ref
+
+    api = FakeApi(agents=[{"id": "tool:shortdesc:geared",
+                           "name": "Short desc · Geared", "kind": "tool"}])
+    tg = FakeTg()
+    await handle_update(msg("/agents"), tg, api, turn_timeout=30)
+    buttons = [b for row in tg.keyboards[0]["inline_keyboard"] for b in row]
+    target = next(b for b in buttons if b["text"] == "Short desc · Geared")
+    assert len(target["callback_data"].encode()) <= 64
+
+    await handle_update(cb(target["callback_data"]), tg, api, turn_timeout=30)
+    assert api.selected == "tool:shortdesc:geared"
