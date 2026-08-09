@@ -13,6 +13,7 @@ async def handle(_req):
             "api_base": cfg.api_base,
             "self_url": cfg.self_url,
             "max_duration": cfg.max_duration,
+            "whatsapp": cfg.whatsapp_ready,
         })
     except Exception as exc:
         # The message names which variable is missing, which is the whole
