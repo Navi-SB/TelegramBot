@@ -142,16 +142,17 @@ async def handle_inbound(
         await ch.send(ctx.chat_id, S.PLATFORM_DOWN)
         return
 
-    if not link.get("linked"):
-        # The ONLY thing an unlinked chat may do.
-        if ctx.command == "start" and ctx.args:
-            await _redeem(ctx, ch, api)
-        else:
-            await ch.send(ctx.chat_id, S.NOT_LINKED)
-        return
-
     try:
-        if ctx.callback_data:
+        if not link.get("linked"):
+            # The ONLY thing an unlinked chat may do. Inside the guard: the
+            # post-pairing agent list hits the platform too, and a failure
+            # there must degrade to a message, not to silence after
+            # "Connected".
+            if ctx.command == "start" and ctx.args:
+                await _redeem(ctx, ch, api)
+            else:
+                await ch.send(ctx.chat_id, S.NOT_LINKED)
+        elif ctx.callback_data:
             await _callback(ctx, ch, api)
         elif ctx.command:
             await _command(ctx, ch, api, link, turn_timeout=turn_timeout)
@@ -171,6 +172,11 @@ async def handle_inbound(
 async def _redeem(ctx: Inbound, ch: Channel, api: PlatformClient) -> None:
     try:
         res = await api.redeem(ctx.chat_id, ctx.args, ctx.sender_id, ctx.sender_name)
+    except PlatformUnavailable:
+        # The backend never saw the code, so it wasn't burned. LINK_FAILED
+        # would send the user off to regenerate a still-valid link; let the
+        # outer guard say the platform is down and invite a retry instead.
+        raise
     except PlatformError as exc:
         log("link_failed", chat_id=ctx.log_ref, status=exc.status)
         await ch.send(ctx.chat_id, ch.S.LINK_FAILED)

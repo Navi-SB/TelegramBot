@@ -6,7 +6,7 @@ import pytest
 
 from bot.core.codec import encode, ref
 from bot.core.dispatch import handle_inbound
-from bot.platform.client import PlatformError
+from bot.platform.client import PlatformError, PlatformUnavailable
 from bot.whatsapp import strings as S
 from bot.whatsapp.api import WhatsAppError, WhatsAppUndeliverable, WhatsAppWindowClosed
 from bot.whatsapp.channel import WhatsAppChannel
@@ -108,6 +108,30 @@ async def test_the_code_reaches_the_platform_verbatim():
 async def test_a_bad_code_says_so_without_detail():
     wa = await run(text_msg("LINK bad"), FakeApi(linked=False))
     assert S.LINK_FAILED in wa.all_text
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_platform_is_not_reported_as_a_bad_code():
+    # The backend never saw the code, so it wasn't burned — "invalid or
+    # expired" would send the user off to regenerate a still-valid link.
+    class Api(FakeApi):
+        async def redeem(self, chat_id, code, user_id, name):
+            raise PlatformUnavailable(0, "ConnectError")
+
+    wa = await run(text_msg("LINK somecode"), Api(linked=False))
+    assert S.PLATFORM_DOWN in wa.all_text
+    assert S.LINK_FAILED not in wa.all_text
+
+
+@pytest.mark.asyncio
+async def test_pairing_that_succeeds_is_announced_even_if_the_agent_list_fails():
+    class Api(FakeApi):
+        async def agents(self, chat_id):
+            raise PlatformUnavailable(0, "ReadTimeout")
+
+    wa = await run(text_msg("LINK somecode"), Api(linked=False))
+    assert "Connected to" in wa.all_text
+    assert S.PLATFORM_DOWN in wa.all_text  # the missing picker is explained, not silence
 
 
 # ---------------------------------------------------------------------------
