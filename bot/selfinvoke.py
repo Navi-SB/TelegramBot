@@ -32,10 +32,25 @@ def sign(body: bytes, ts: str, secret: str) -> str:
 
 
 def verify(headers: dict[str, str], body: bytes, secret: str) -> bool:
+    """`secret` may be a comma-separated list, so a key can be rotated without
+    downtime — add the new one, deploy both sides, drop the old one. The same
+    shape VOYAGECALC_SERVICE_TOKEN_HASHES uses on the platform side."""
     ts = headers.get("x-bot-ts", "")
     if not ts.isdigit() or abs(time.time() - int(ts)) > REPLAY_WINDOW_SECONDS:
         return False
-    return hmac.compare_digest(headers.get("x-bot-sig", ""), sign(body, ts, secret))
+    presented = headers.get("x-bot-sig", "")
+    return any(
+        hmac.compare_digest(presented, sign(body, ts, candidate))
+        for candidate in (c.strip() for c in secret.split(",")) if candidate
+    )
+
+
+def stale_timestamp(headers: dict[str, str]) -> bool:
+    """True when only the clock is wrong. Worth distinguishing from a bad
+    signature: one is a key mismatch, the other is NTP drift between two
+    machines, and they are fixed in completely different places."""
+    ts = headers.get("x-bot-ts", "")
+    return not ts.isdigit() or abs(time.time() - int(ts)) > REPLAY_WINDOW_SECONDS
 
 
 async def fire_detailed(

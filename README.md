@@ -44,7 +44,18 @@ python3 -c "import secrets; print('WEBHOOK_SECRET :', secrets.token_urlsafe(32))
 python3 -c "import secrets; print('INTERNAL_SECRET:', secrets.token_urlsafe(32))"
 python3 -c "import hashlib,secrets; t=secrets.token_urlsafe(32); \
 print('SERVICE_TOKEN  :', t); print('  -> hash for VoyageCalc:', hashlib.sha256(t.encode()).hexdigest())"
+python3 -c "import secrets; print('PUSH_SECRET    :', secrets.token_urlsafe(32))"
 ```
+
+Each of these is ONE value for the whole deployment — a password between two
+machines, not anything per user. You generate them once at setup and never
+touch them again except to rotate.
+
+`PUSH_SECRET` is only needed if workflows send on a schedule (NAV-77). It is
+deliberately NOT `INTERNAL_SECRET`: that one is Vercel signing a call to
+itself and lives on this machine alone, while this one also lives on the
+VoyageCalc VPS and authorises a different thing — "speak as the bot to a chat".
+Different power, different key, different blast radius if one leaks.
 
 ### 2. Tell VoyageCalc about the bot
 
@@ -53,7 +64,23 @@ In `backend/.env` on the VPS, then `sudo systemctl restart voyagecalc`:
 ```
 VOYAGECALC_SERVICE_TOKEN_HASHES=<the sha256 from above>
 TELEGRAM_BOT_USERNAME=tropisHQ_bot
+
+# Only for scheduled workflows (NAV-77). Same value as BOT_PUSH_SECRET here.
+BOT_PUSH_SECRET=<the PUSH_SECRET from above>
+BOT_PUSH_URL=https://tgbot.tropishq.com/api/push
+VOYAGECALC_SCHEDULER=1
 ```
+
+Both token variables accept a **comma-separated list**, so either can be
+rotated without downtime: add the new value on both sides, deploy, then drop
+the old one.
+
+WHO a pushed message goes to is not decided by this secret. That comes from
+`channel_links` — the row written when that particular broker redeemed a
+pairing code in their own chat. The secret says "this caller is our backend";
+the link row says "this is that person's Telegram". `/api/push` re-checks the
+link before it sends anything, which is why a leaked push secret still cannot
+message an arbitrary chat id.
 
 Until that's set, `/api/bot/*` returns **503** — the surface is closed by
 default, so deploying it before the bot exists opens nothing.
