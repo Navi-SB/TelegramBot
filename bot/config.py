@@ -31,6 +31,12 @@ class Config:
     wa_app_secret: str | None = None
     wa_waba_id: str | None = None
     wa_graph_version: str = "v26.0"
+    # Outbound pushes from VoyageCalc (a workflow on a schedule). Its OWN
+    # secret, never internal_secret: that one is Vercel signing a call to
+    # itself and lives on one machine, while this has to live on the VPS too
+    # and authorises a different thing. Comma-separated for rotation. Unset =
+    # /api/push answers 503 and nothing can be pushed.
+    push_secret: str | None = None
 
     @property
     def deadline_seconds(self) -> float:
@@ -98,6 +104,7 @@ def load() -> Config:
         wa_app_secret=os.environ.get("WHATSAPP_APP_SECRET") or None,
         wa_waba_id=os.environ.get("WHATSAPP_WABA_ID") or None,
         wa_graph_version=os.environ.get("WHATSAPP_GRAPH_VERSION", "v26.0"),
+        push_secret=os.environ.get("BOT_PUSH_SECRET") or None,
     )
 
     # A Preview deploy silently stealing the production webhook is a very easy
