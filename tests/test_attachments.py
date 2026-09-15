@@ -5,6 +5,7 @@ the stream really is abandoned part-way, and the exceptions really are the
 ones a transport would raise (whose messages can carry the URL).
 """
 import base64
+import hashlib
 import json
 import logging
 
@@ -14,7 +15,7 @@ import pytest
 from bot import strings as S
 from bot.core.attachments import (
     MAX_BYTES, Attachment, AttachmentTooLarge, AttachmentUnavailable, read_capped,
-    to_payload,
+    sha256_matches, to_payload,
 )
 from bot.dispatch import handle_update
 from bot.platform.client import PlatformClient
@@ -210,3 +211,15 @@ def test_a_very_long_file_name_is_trimmed_but_keeps_its_extension():
     assert len(payload["filename"]) == 255
     assert payload["filename"].endswith(".pdf")
     assert to_payload(Attachment(ref="f"), b"x")["filename"] is None
+
+
+def test_a_hash_matches_as_hex_or_base64_and_nothing_else():
+    data = b"%PDF-1.7 recap"
+    digest = hashlib.sha256(data).digest()
+    assert sha256_matches(digest.hex(), data)
+    assert sha256_matches(digest.hex().upper(), data)
+    assert sha256_matches(base64.b64encode(digest).decode(), data)
+    assert sha256_matches(base64.urlsafe_b64encode(digest).decode().rstrip("="), data)
+    assert not sha256_matches(hashlib.sha256(b"other").hexdigest(), data)
+    assert not sha256_matches("not a hash at all", data)
+    assert not sha256_matches("", data)

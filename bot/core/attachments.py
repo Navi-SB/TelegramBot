@@ -19,6 +19,8 @@ owners, charterers and vessels, and a download URL can carry the bot token.
 from __future__ import annotations
 
 import base64
+import binascii
+import hashlib
 import os
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -43,6 +45,7 @@ class Attachment:
     file_name: Optional[str] = None
     mime_hint: Optional[str] = None   # sender-declared; the backend sniffs
     size_hint: Optional[int] = None   # declared; enforced again on the stream
+    sha256: Optional[str] = None      # WhatsApp's webhook hash, when given
 
 
 class AttachmentError(RuntimeError):
@@ -100,6 +103,25 @@ async def read_capped(
         # body is a download that went wrong, not a file.
         raise AttachmentUnavailable("empty")
     return bytes(buf)
+
+
+def sha256_matches(expected: str, data: bytes) -> bool:
+    """Meta documents the field as "the SHA-256 of the file" without saying
+    how it is spelled, so accept the digest as hex or as base64 — the same
+    32 bytes either way — and nothing else. A spelling we don't recognise
+    fails closed: the user is asked to resend rather than the backend being
+    handed bytes that may not be what was sent."""
+    digest = hashlib.sha256(data).digest()
+    value = expected.strip()
+    if value.lower() == digest.hex():
+        return True
+    for decode in (base64.b64decode, base64.urlsafe_b64decode):
+        try:
+            if decode(value + "=" * (-len(value) % 4)) == digest:
+                return True
+        except (binascii.Error, ValueError):
+            continue
+    return False
 
 
 def to_payload(att: Attachment, data: bytes) -> dict[str, Any]:

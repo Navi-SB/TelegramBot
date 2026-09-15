@@ -8,16 +8,21 @@ The structural differences from Telegram, all contained here:
     quietly (the user is unreachable — cascading errors help nobody).
   - Interactive body is capped at 1024 → the confirm card truncates at ~950,
     much harder than Telegram's 3500, with the same web-app pointer.
+  - A file is a media id → a fresh short-lived URL → a Bearer download,
+    checked against the hash Meta gives for it.
 """
 from __future__ import annotations
 
 from typing import Any
 
+from ..core.attachments import (
+    Attachment, AttachmentTooLarge, AttachmentUnavailable, sha256_matches,
+)
 from ..core.dispatch import Inbound, Progress, diff_lines
 from ..logging import log, log_exception
 from ..platform.client import PlatformClient, PlatformError
 from . import strings as S
-from .api import WhatsAppClient, WhatsAppUndeliverable, WhatsAppWindowClosed
+from .api import WhatsAppClient, WhatsAppError, WhatsAppUndeliverable, WhatsAppWindowClosed
 from .keyboards import confirm_write_buttons, picker_rows, unlink_buttons
 from .render import log_ref, md_to_wa, split_wa
 
@@ -107,6 +112,30 @@ class WhatsAppChannel:
         # ack() already marked read + typing; there is nothing to edit later,
         # so no placeholder is sent — it would sit in the thread forever.
         return WhatsAppProgress(self, ctx.chat_id)
+
+    async def fetch_attachment(self, att: Attachment, max_bytes: int) -> bytes:
+        # No "reading the file" notice: it can't be edited into the answer,
+        # so it would sit in the thread — and outbound messages cost money.
+        try:
+            media = await self._wa.get_media(att.ref)
+        except WhatsAppError as exc:
+            raise AttachmentUnavailable(f"media_{exc.code}") from None
+        except Exception as exc:  # noqa: BLE001 — transport
+            raise AttachmentUnavailable(type(exc).__name__) from None
+
+        size = str(media.get("file_size") or "")  # Graph's examples send a string
+        if size.isdigit() and int(size) > max_bytes:
+            raise AttachmentTooLarge()
+        url = media.get("url")
+        if not isinstance(url, str) or not url:
+            raise AttachmentUnavailable("no_media_url")
+
+        data = await self._wa.download_media(url, max_bytes)
+        # Every hash Meta gave us for this file must match what arrived.
+        for expected in (media.get("sha256"), att.sha256):
+            if expected and not sha256_matches(str(expected), data):
+                raise AttachmentUnavailable("sha256_mismatch")
+        return data
 
     def format_markdown(self, md: str) -> list[str]:
         return split_wa(md_to_wa(md))

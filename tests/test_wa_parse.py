@@ -86,13 +86,14 @@ def test_button_and_list_replies_carry_the_codec_id():
 def test_media_asks_for_text_and_reactions_are_ignored():
     msgs = [
         {"from": NUM, "id": "wamid.M1", "type": "image",
-         "image": {"id": "media1", "mime_type": "image/jpeg"}},
+         "image": {"id": "media1", "mime_type": "image/jpeg", "caption": "a photo of a Q88"}},
         {"from": NUM, "id": "wamid.R1", "type": "reaction",
          "reaction": {"message_id": "wamid.A1", "emoji": "👍"}},
     ]
     envs = parse_envelopes(wa_body(msgs))
     assert len(envs) == 1  # the reaction produced nothing
-    assert envs[0].is_unsupported_media
+    assert envs[0].is_unsupported_media  # a photo of a file is still a photo
+    assert envs[0].attachment is None and envs[0].media_kind == "image"
 
 
 def test_a_batch_yields_one_envelope_per_message():
@@ -142,3 +143,49 @@ def test_empty_and_whitespace_bodies_produce_no_envelope():
     """'' answered nothing after an ack; '  ' burned a real agent turn."""
     assert parse_envelopes(wa_body([text_msg("")])) == []
     assert parse_envelopes(wa_body([text_msg("   ")])) == []
+
+
+# ---------------------------------------------------------------------------
+# documents (NAV-81) — read, not refused
+# ---------------------------------------------------------------------------
+def doc_msg(caption=None, mid="wamid.D1", **over):
+    document = {"id": "1234567890", "filename": "Recap MV OCEAN STAR.docx",
+                "mime_type": "application/vnd.openxmlformats-officedocument"
+                             ".wordprocessingml.document",
+                "sha256": "abc123", **over}
+    if caption is not None:
+        document["caption"] = caption
+    return {"from": NUM, "id": mid, "timestamp": "1722945600", "type": "document",
+            "document": document}
+
+
+def test_a_document_becomes_an_attachment_with_its_caption_and_name():
+    [ctx] = parse_envelopes(wa_body([doc_msg("short desc please")]))
+    assert not ctx.is_unsupported_media
+    assert ctx.text == "short desc please"
+    att = ctx.attachment
+    assert (att.ref, att.file_name, att.sha256) == ("1234567890", "Recap MV OCEAN STAR.docx", "abc123")
+    assert att.mime_hint.endswith("wordprocessingml.document")
+    assert att.size_hint is None  # the webhook doesn't say; get_media does
+
+
+def test_a_document_without_a_caption_still_arrives():
+    for caption in (None, "", "   "):
+        [ctx] = parse_envelopes(wa_body([doc_msg(caption)]))
+        assert ctx.attachment is not None
+        assert ctx.text is None
+
+
+def test_a_document_caption_is_never_a_command():
+    """'new' under a recap is about the recap; 'LINK x' under a file is not a
+    pairing attempt."""
+    for caption in ("new", "help", "/agents", "LINK AbC-123"):
+        [ctx] = parse_envelopes(wa_body([doc_msg(caption)]))
+        assert (ctx.command, ctx.args) == (None, ""), caption
+        assert ctx.text == caption
+
+
+def test_a_document_without_a_media_id_is_refused_rather_than_dropped():
+    [ctx] = parse_envelopes(wa_body([doc_msg(id=None)]))
+    assert ctx.attachment is None
+    assert ctx.is_unsupported_media
