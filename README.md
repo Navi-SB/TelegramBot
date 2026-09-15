@@ -145,12 +145,62 @@ a rewrite — and developing locally keeps it honest.
 | | |
 |---|---|
 | *(any message)* | ask the current agent |
+| *(a PDF or Word file)* | read it; the caption, if any, says what to do with it |
 | `/agents` | pick which of your agents to use |
 | `/agent <name>` | pick by name |
 | `/new` | fresh conversation with the current agent |
 | `/status` | account, agent, conversation length |
 | `/unlink` | disconnect this chat (two-step) |
 | `/help` | answered with no network call |
+
+---
+
+## Files (PDF and Word)
+
+Send a PDF (text or scanned) or a Word `.docx` — a Q88, a recap — with or
+without a caption. The caption is the instruction ("pmx format", "add these
+fixtures") and is never read as a command, so `/new` under a file is about
+the file.
+
+The bridge **fetches and forwards; it never reads**. Only it holds the
+Telegram and WhatsApp tokens, so it downloads the file and posts it to
+`/api/bot/turn` next to the caption:
+
+```json
+{"channel": "telegram", "chat_id": "…", "content": "<caption or empty>",
+ "attachment": {"filename": "…", "mime_type": "…", "data_b64": "<base64>"}}
+```
+
+VoyageCalc sniffs the bytes and decides what the file is. A legacy `.doc`,
+a `.docm`, a spreadsheet or garbage comes back as an ordinary reply
+explaining why (`stop_reason: attachment_rejected`), and the bridge delivers
+it like any other answer. Text turns send no `attachment` key at all.
+
+| | Telegram | WhatsApp |
+|---|---|---|
+| Arrives as | `document.file_id` | `document.id` (a media id) |
+| Download | `getFile` → `api.telegram.org/file/bot<token>/<path>` | `GET /{media_id}` → a URL valid 5 min → GET with the Bearer token |
+| Integrity | — | every sha256 Meta supplies must match (hex or base64) |
+| While downloading | placeholder reads "📄 Reading the file…" | nothing extra (no edits, and sends cost money) |
+
+The rules, all in `bot/core/`:
+
+- **5 MB cap** (`attachments.MAX_BYTES`). A file *declared* bigger is refused
+  without downloading; the download itself streams and stops the moment it
+  passes the cap, because declared sizes and `Content-Length` are hints.
+  Telegram's cloud Bot API can't hand out files over 20 MB at all — that
+  also reads as "too big".
+- **Linked chats only.** The file is fetched after the link check, so an
+  unlinked chat can never make the bot download anything.
+- **Inside the turn deadline.** The download gets at most half of it (and
+  never more than 60 s); whatever it uses comes off the backend call.
+- **Every failure has its own message**: too large, couldn't download
+  (retry), and — for an old backend that 422s a file turn — "can't read
+  files here yet". Photos, voice notes, stickers, GIFs and the rest still get
+  the text-only nudge, now naming what *does* work.
+- **Deploy VoyageCalc first.** An old backend ignores the unknown
+  `attachment` key: a caption-less file 422s (and says "not yet"), but a
+  captioned one would be answered as if only the caption had been sent.
 
 ---
 
@@ -172,7 +222,12 @@ the user receives nothing at all.
 **Nothing sensitive is logged.** No message text, agent output, rendered
 templates, tool arguments, pairing codes or tokens. Telegram already stores
 chat content; Vercel's logs would be a second copy of commercially sensitive
-fixture data in a third-party system, and that one is avoidable.
+fixture data in a third-party system, and that one is avoidable. Files add
+three more never-logs: the file name (it often names an owner, charterer or
+vessel), the caption, and the download URL — Telegram's has the bot token in
+its path, which is also why httpx's own request logging is held at WARNING.
+Refused media is logged as `media_refused` with its kind and declared MIME
+type only; a failed download as `attachment_failed` with a short reason code.
 
 ## WhatsApp (Meta Cloud API)
 
@@ -192,6 +247,7 @@ What differs from Telegram, by design:
 | Confirm cards | ≤3500 chars under the keyboard | ≤950 chars (interactive body caps at 1024) |
 | Blocked | inbound `my_chat_member` | error 131026 on a send → `mark_blocked`, once |
 | Dedupe key | `update_id` | per-message `wamid` (one POST can batch several) |
+| Files | `getFile` + tokenised download URL | media id → fresh 5-minute URL → Bearer download, sha256-checked |
 | Dev loop | `scripts/dev_poll.py` | webhook-only — use the dashboard test number + a tunnel (no polling exists) |
 
 Because the bot only ever replies inside the 24-hour service window, no paid
