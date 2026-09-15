@@ -215,6 +215,18 @@ def status(account: str, agent: str | None, turns: int, agents_of: str | None = 
     )
 
 
+def rate_limited(wait: str, *, daily: bool, file: bool) -> str:
+    """The platform turned the turn away for sending too much (a 429). `wait`
+    is how long, in words ("a minute", "about 3 hours")."""
+    what = "that file wasn't read" if file else "that message wasn't processed"
+    if daily:
+        return (f"⏳ You've reached the daily limit of messages to me, so <b>{what}</b>. "
+                f"Send it again in {wait}.")
+    many = "files" if file else "messages"
+    return (f"⏳ That's more {many} than I can take at once, so <b>{what}</b>. "
+            f"Send it again in {wait}.")
+
+
 def agent_error(error_class: str) -> str:
     # The exception CLASS only — messages can carry paths, SQL or key material.
     return f"❌ The agent hit an error (<code>{error_class}</code>). Try rephrasing, or /new."

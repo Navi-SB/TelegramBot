@@ -32,6 +32,24 @@ from .codec import decode, ref
 _FETCH_SHARE = 0.5
 _FETCH_MAX_SECONDS = 60.0
 
+# The longest Retry-After the per-minute ceiling gives (its window plus a
+# second, with room). Anything longer is the daily one. The daily one can
+# also free a slot within a minute, and then reads as the per-minute one:
+# sending it again in a minute is still right.
+_BURST_WAIT_MAX = 120
+
+
+def _wait_words(seconds: Optional[int]) -> str:
+    """How long a 429 says to wait, as the user reads it. No Retry-After is
+    read as the per-minute ceiling, by far the one a chat meets."""
+    if seconds is None or seconds <= _BURST_WAIT_MAX:
+        return "a minute"
+    if seconds < 3600:
+        return f"about {-(-seconds // 60)} minutes"
+    hours = max(1, round(seconds / 3600))
+    return f"about {hours} hour{'s' if hours != 1 else ''}"
+
+
 _MIME_SHAPE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")
 
 
@@ -467,6 +485,15 @@ async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
             # The chat was unlinked, or its account suspended, after the link
             # check above. Say what the link check would have said.
             text = ch.S.NOT_LINKED
+        elif exc.status == 429:
+            # The platform's ceilings: 6 messages a minute per chat, which
+            # several files selected together pass at once, and a daily one
+            # per account. Nothing broke and /new would not help; waiting does.
+            daily = exc.retry_after is not None and exc.retry_after > _BURST_WAIT_MAX
+            log("turn_rate_limited", chat_id=ctx.log_ref, retry_after=exc.retry_after,
+                kind="file" if payload is not None else "text")
+            text = ch.S.rate_limited(_wait_words(exc.retry_after), daily=daily,
+                                     file=payload is not None)
         elif exc.status in (504, 0):
             text = ch.S.TURN_TIMEOUT
         else:
