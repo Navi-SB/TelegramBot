@@ -72,6 +72,7 @@ def _parse_message(m: dict[str, Any], names: dict[str, Optional[str]]) -> Option
     args = ""
     callback_data: Optional[str] = None
     media = False
+    media_mime: Optional[str] = None
 
     if mtype == "text":
         text = (m.get("text") or {}).get("body") or ""
@@ -88,6 +89,8 @@ def _parse_message(m: dict[str, Any], names: dict[str, Optional[str]]) -> Option
             return None  # flow replies etc. — nothing we handle
     elif mtype in _MEDIA_TYPES:
         media = True
+        body = m.get(mtype)
+        media_mime = body.get("mime_type") if isinstance(body, dict) else None
     else:
         return None
 
@@ -105,6 +108,8 @@ def _parse_message(m: dict[str, Any], names: dict[str, Optional[str]]) -> Option
         is_private=True,  # the Cloud API only delivers 1:1 traffic
         blocked=False,    # WhatsApp has no inbound block signal; learned send-side
         log_ref=log_ref(frm),
+        media_kind=mtype if media else None,
+        media_mime=media_mime,
     )
 
 

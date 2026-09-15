@@ -2,6 +2,9 @@
 WhatsApp channel adapter, with a fake Cloud API client and the same fake
 platform the Telegram tests use. The behavioural invariants (reveal-nothing
 gate, outputs-before-error, 409 semantics) must hold identically here."""
+import json
+import logging
+
 import pytest
 
 from bot.core.codec import encode, ref
@@ -164,10 +167,18 @@ async def test_help_needs_no_network():
 
 
 @pytest.mark.asyncio
-async def test_media_gets_a_useful_refusal():
-    msg = {"from": NUM, "id": "wamid.M1", "type": "image", "image": {"id": "m1"}}
-    wa = await run(msg, FakeApi())
+async def test_media_gets_a_useful_refusal(caplog):
+    caplog.set_level(logging.INFO, logger="tropis.bot")
+    msg = {"from": NUM, "id": "wamid.M1", "type": "image",
+           "image": {"id": "m1", "mime_type": "image/jpeg", "caption": "MV SECRET"}}
+    api = FakeApi()
+    wa = await run(msg, api)
     assert S.TEXT_ONLY in wa.all_text
+    assert api.calls == []
+    [event] = [json.loads(r.getMessage()) for r in caplog.records]
+    assert (event["event"], event["kind"], event["mime"]) == ("media_refused", "image", "image/jpeg")
+    assert event["chat_id"] != NUM  # the keyed log ref, never the phone number
+    assert "SECRET" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

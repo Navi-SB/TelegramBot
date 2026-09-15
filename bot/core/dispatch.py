@@ -13,12 +13,26 @@ across the extraction.
 """
 from __future__ import annotations
 
+import asyncio
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
 from ..logging import log, log_exception
 from ..platform.client import PlatformClient, PlatformError, PlatformUnavailable
+from .attachments import (
+    MAX_BYTES, Attachment, AttachmentError, AttachmentTooLarge, to_payload,
+)
 from .codec import decode, ref
+
+# A download gets at most this share of the turn deadline, and never more than
+# this many seconds: whatever it uses comes off the time the agent gets, and a
+# file that takes a minute to arrive is not going to arrive.
+_FETCH_SHARE = 0.5
+_FETCH_MAX_SECONDS = 60.0
+
+_MIME_SHAPE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")
 
 
 @dataclass
@@ -38,6 +52,13 @@ class Inbound:
     is_private: bool = True
     blocked: bool = False         # Telegram-only; WhatsApp learns it send-side
     log_ref: str = ""             # what logs show for this chat; never a phone number
+    # A PDF or Word file (or anything sent AS a file — the backend decides).
+    # Its caption, if any, is `text`, and is never read as a command.
+    attachment: Optional[Attachment] = None
+    # What an unsupported message was ("photo", "sticker") and its declared
+    # type, for the media_refused log line only.
+    media_kind: Optional[str] = None
+    media_mime: Optional[str] = None
 
     def __post_init__(self):
         if not self.log_ref:
@@ -107,6 +128,10 @@ class Channel(Protocol):
     async def send_unlink_confirm(self, chat_id: str) -> None: ...
     async def send_confirm_write(self, chat_id: str, pending: dict[str, Any]) -> None: ...
     async def begin_progress(self, ctx: "Inbound") -> Progress: ...
+    async def fetch_attachment(self, att: Attachment, max_bytes: int) -> bytes:
+        """The file's bytes, or AttachmentTooLarge / AttachmentUnavailable.
+        Nothing else may escape: the core turns those two into messages."""
+        ...
     def format_markdown(self, md: str) -> list[str]: ...
     def format_verbatim(self, text: str) -> list[str]: ...
 
@@ -132,6 +157,10 @@ async def handle_inbound(
         await ch.send(ctx.chat_id, S.HELP)
         return
     if ctx.is_unsupported_media:
+        # The kind and declared type only — never a file name or caption.
+        # This is how demand for photos and voice notes gets measured.
+        log("media_refused", chat_id=ctx.log_ref, kind=ctx.media_kind,
+            mime=_loggable_mime(ctx.media_mime))
         await ch.send(ctx.chat_id, S.TEXT_ONLY)
         return
 
@@ -154,6 +183,10 @@ async def handle_inbound(
                 await ch.send(ctx.chat_id, S.NOT_LINKED)
         elif ctx.callback_data:
             await _callback(ctx, ch, api)
+        elif ctx.attachment is not None:
+            # Only here, past the link check: an unlinked chat must never be
+            # able to make the bot download anything.
+            await _turn(ctx, ch, api, turn_timeout=turn_timeout)
         elif ctx.command:
             await _command(ctx, ch, api, link, turn_timeout=turn_timeout)
         elif ctx.text:
@@ -356,15 +389,44 @@ async def _confirm(ctx, ch, api, args: list[str]) -> None:
 
 
 async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
+    started = time.monotonic()
+    att: Optional[Attachment] = ctx.attachment
+    if att is not None and att.size_hint and att.size_hint > MAX_BYTES:
+        # Declared too big: say so without downloading a byte of it.
+        log("attachment_failed", chat_id=ctx.log_ref, outcome="declared_too_large")
+        await ch.send(ctx.chat_id, ch.S.FILE_TOO_LARGE)
+        return
+
     prog = await ch.begin_progress(ctx)
 
+    payload = None
+    if att is not None:
+        payload = await _fetch(ctx, ch, prog, att, turn_timeout)
+        if payload is None:
+            return
+
+    # The download already spent part of the deadline; the turn gets the rest.
+    remaining = max(1.0, turn_timeout - (time.monotonic() - started))
     try:
-        result = await api.turn(ctx.chat_id, ctx.text or "", timeout=turn_timeout)
+        result = await api.turn(ctx.chat_id, ctx.text or "",
+                                attachment=payload, timeout=remaining)
     except PlatformUnavailable:
         await _deliver(prog, [ch.S.PLATFORM_DOWN])
         return
     except PlatformError as exc:
-        text = ch.S.TURN_TIMEOUT if exc.status in (504, 0) else ch.S.UNEXPECTED
+        if payload is not None and exc.status == 422:
+            # A backend from before file support. It ignores the unknown
+            # `attachment` key, so what it 422s on is the empty content of a
+            # caption-less file. (Given a caption it would quietly answer the
+            # caption alone — which is why the backend deploys first.) Say
+            # "not yet", not "something went wrong": retrying won't help.
+            text = ch.S.FILES_NOT_SUPPORTED_YET
+        elif payload is not None and exc.status == 413:
+            text = ch.S.FILE_TOO_LARGE
+        elif exc.status in (504, 0):
+            text = ch.S.TURN_TIMEOUT
+        else:
+            text = ch.S.UNEXPECTED
         await _deliver(prog, [text])
         return
 
@@ -398,7 +460,39 @@ async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
             log_exception("confirm_card_send_failed", exc, chat_id=ctx.log_ref)
 
     log("turn_done", chat_id=ctx.log_ref, tools=result.get("tools_used"),
-        chunks=len(chunks), outcome=result.get("stop_reason"))
+        chunks=len(chunks), outcome=result.get("stop_reason"),
+        kind="file" if payload is not None else "text")
+
+
+async def _fetch(ctx, ch, prog: Progress, att: Attachment,
+                 turn_timeout: float) -> Optional[dict[str, Any]]:
+    """Download the file and shape it for /api/bot/turn — or tell the user
+    why not and return None. The bytes live only as long as this turn."""
+    budget = min(_FETCH_MAX_SECONDS, turn_timeout * _FETCH_SHARE)
+    try:
+        data = await asyncio.wait_for(ch.fetch_attachment(att, MAX_BYTES), budget)
+    except AttachmentTooLarge as exc:
+        log("attachment_failed", chat_id=ctx.log_ref, outcome=exc.reason)
+        await _deliver(prog, [ch.S.FILE_TOO_LARGE])
+        return None
+    except AttachmentError as exc:
+        log("attachment_failed", chat_id=ctx.log_ref, outcome=exc.reason)
+        await _deliver(prog, [ch.S.FILE_UNAVAILABLE])
+        return None
+    except asyncio.TimeoutError:
+        log("attachment_failed", chat_id=ctx.log_ref, outcome="timeout")
+        await _deliver(prog, [ch.S.FILE_UNAVAILABLE])
+        return None
+    return to_payload(att, data)
+
+
+def _loggable_mime(mime: Optional[str]) -> Optional[str]:
+    """A declared type is sender-controlled text. Only something shaped like
+    a MIME type reaches the logs; anything else is just "other"."""
+    if not mime:
+        return None
+    m = mime.strip().lower()[:100]
+    return m if _MIME_SHAPE.match(m) else "other"
 
 
 async def _deliver(prog: Progress, chunks: list[str]) -> int:

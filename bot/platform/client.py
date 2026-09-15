@@ -101,14 +101,22 @@ class PlatformClient:
 
     # --- the turn -----------------------------------------------------------
 
-    async def turn(self, chat_id: str, content: str, *, timeout: float) -> dict[str, Any]:
+    async def turn(
+        self, chat_id: str, content: str, *,
+        attachment: Optional[dict[str, Any]] = None, timeout: float,
+    ) -> dict[str, Any]:
         """Run one agent turn. Long by nature — the platform assembles the
-        reply, so the narration rule lives in exactly one place."""
-        return await self._call(
-            "POST", "/api/bot/turn",
-            json={"channel": self._channel, "chat_id": chat_id, "content": content},
-            timeout=timeout,
-        )
+        reply, so the narration rule lives in exactly one place.
+
+        attachment is {filename, mime_type, data_b64} for a file turn (the
+        caption, possibly empty, is `content`). The key is left out entirely
+        for a text turn, so a text turn is byte-for-byte what it always was
+        and works against a backend that has never heard of files."""
+        body: dict[str, Any] = {"channel": self._channel, "chat_id": chat_id,
+                                "content": content}
+        if attachment is not None:
+            body["attachment"] = attachment
+        return await self._call("POST", "/api/bot/turn", json=body, timeout=timeout)
 
     async def confirm(self, chat_id: str, pending_id: str, action: str) -> dict[str, Any]:
         return await self._call("POST", "/api/bot/confirm", json={

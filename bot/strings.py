@@ -23,7 +23,9 @@ LINK_FAILED = (
 
 HELP = (
     "<b>Tropis assistant</b>\n\n"
-    "Just send a message to talk to your agent.\n\n"
+    "Just send a message to talk to your agent.\n"
+    "Send a PDF or Word file — a Q88, a recap — and add a caption to say what "
+    "you want.\n\n"
     "/agents — pick which of your agents to talk to\n"
     "/short — turn a pasted vessel description into a broker short description\n"
     "/new — start a fresh conversation with the current agent\n"
@@ -40,11 +42,30 @@ GROUPS_UNSUPPORTED = (
 )
 
 TEXT_ONLY = (
-    "I can only read text right now. Paste vessel descriptions or fixture "
-    "lines as text."
+    "I can read text, PDF files and Word (.docx) files — not photos, voice "
+    "notes or other media yet. Paste the text, or send the document itself "
+    "as a file."
 )
 
 THINKING = "⏳ Thinking…"
+
+READING_FILE = "📄 Reading the file…"
+
+# The limit is bot/core/attachments.py's MAX_BYTES; a test keeps them in step.
+FILE_TOO_LARGE = (
+    "📄 That file is too big — I can read files up to <b>5 MB</b>. Try a "
+    "smaller export, or paste the part you need as text."
+)
+
+FILE_UNAVAILABLE = (
+    "📄 I couldn't download that file from Telegram. <b>It wasn't "
+    "processed</b> — try sending it again."
+)
+
+FILES_NOT_SUPPORTED_YET = (
+    "📄 I can't read files here yet — the platform needs an update first. "
+    "Paste the text for now."
+)
 
 PLATFORM_DOWN = (
     "🔌 I can't reach Tropis right now. <b>Your message wasn't processed</b> — "
