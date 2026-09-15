@@ -51,11 +51,15 @@ class FakeTg:
 
 
 class FakeApi:
-    def __init__(self, *, linked=True, agents=None, turn=None, fail=None, account=None):
+    def __init__(self, *, linked=True, agents=None, turn=None, fail=None, account=None,
+                 user=None, active_gone=None):
         self._linked = linked
         # The platform's "whose agents are these" label; None is a platform
         # that predates it, which sends no key at all.
         self._account = account
+        self._user = user or {"id": "u1", "name": "Alex", "email": "a@x.com"}
+        # "agent", "format" or "workflow" when the chat's choice is gone.
+        self._active_gone = active_gone
         self._agents = agents or []
         self._turn = turn or {"reply": "hello", "vessel_outputs": [], "pending": [],
                               "tools_used": [], "stop_reason": "end_turn", "error": None}
@@ -70,18 +74,21 @@ class FakeApi:
             raise PlatformUnavailable(0, "ConnectError")
         if not self._linked:
             return {"linked": False}
-        link = {"linked": True, "user": {"id": "u1", "name": "Alex", "email": "a@x.com"}}
+        link = {"linked": True, "user": self._user}
         return {**link, "account": self._account} if self._account else link
 
     async def redeem(self, chat_id, code, tg_user_id, name):
         self.calls.append("redeem")
         if code == "bad":
             raise PlatformError(404, "invalid_or_expired_code")
-        return {"user": {"id": "u1", "name": "Alex", "email": "a@x.com"}}
+        res = {"user": self._user}
+        return {**res, "account": self._account} if self._account else res
 
     async def agents(self, chat_id):
         self.calls.append("agents")
         res = {"agents": self._agents, "active_preset_id": None}
+        if self._active_gone:
+            res["active_gone"] = self._active_gone
         return {**res, "account": self._account} if self._account else res
 
     async def set_session(self, chat_id, preset_id=None, *, new_thread=False):
@@ -303,6 +310,74 @@ async def test_status_takes_the_account_from_the_agent_list_when_the_link_has_no
 
     tg = await run(msg("/status"), Api(account="Acme Shipping"))
     assert "<b>Agents from:</b> Acme Shipping" in tg.sent[-1][1]
+
+
+SEAT = {"id": "u9", "name": "Olivia Ops", "email": "ops1@seat.invalid"}
+
+
+@pytest.mark.asyncio
+async def test_pairing_names_a_company_login_by_company_not_its_placeholder_email():
+    """A company login's email is a made-up address nobody has seen; the live
+    test showed "Connected to Olivia Ops (ops1@seat.invalid)"."""
+    tg = await run(msg("/start code"), FakeApi(linked=False, user=SEAT,
+                                                account="Acme <Shipping> (ops1)"))
+    assert "seat.invalid" not in tg.all_text
+    assert tg.sent[0][1] == S.linked("Olivia Ops", "Acme <Shipping> (ops1)")
+    assert tg.sent[0][1].startswith(
+        "🔗 Connected to <b>Olivia Ops</b> — Acme &lt;Shipping&gt; (ops1).\n")
+
+    # A personal account is still named by its email.
+    tg = await run(msg("/start code"), FakeApi(linked=False, account="a@x.com"))
+    assert tg.sent[0][1].startswith("🔗 Connected to <b>Alex</b> — a@x.com.\n")
+
+    # A platform that sends no label: the placeholder is still never shown.
+    tg = await run(msg("/start code"), FakeApi(linked=False, user=SEAT))
+    assert tg.sent[0][1].startswith("🔗 Connected to <b>Olivia Ops</b>.\n")
+    tg = await run(msg("/start code"), FakeApi(linked=False))
+    assert tg.sent[0][1].startswith("🔗 Connected to <b>Alex</b> — a@x.com.\n")
+
+
+@pytest.mark.asyncio
+async def test_status_names_a_company_login_by_company_not_its_placeholder_email():
+    """It showed "Account: ops1@seat.invalid" above "Agents from: Acme
+    Shipping (ops1)". The label is the account, said once."""
+    tg = await run(msg("/status"), FakeApi(user=SEAT, account="Acme Shipping (ops1)"))
+    text = tg.sent[-1][1]
+    assert "seat.invalid" not in text
+    assert text.startswith("<b>Account:</b> Acme Shipping (ops1)\n<b>Agent:</b>")
+
+    tg = await run(msg("/status"), FakeApi(user=SEAT))
+    assert tg.sent[-1][1].startswith("<b>Account:</b> unknown\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["/new", "/status"])
+async def test_new_and_status_say_the_chats_agent_was_deleted(command):
+    """The live test: with the agent deleted in the web app, /new said "Fresh
+    conversation with plain text" and /status "plain text (no agent)", with no
+    reason, while an ordinary message explained. They moved the chat to plain
+    text all the same."""
+    api = FakeApi(active_gone="agent", account="Acme Shipping (ops1)")
+    tg = await run(msg(command), api)
+    text = tg.sent[-1][1]
+    assert text.startswith(
+        "⚠️ The agent this chat was using was deleted or isn't on "
+        "<b>Acme Shipping (ops1)</b>, so this chat now answers in plain text.\n"
+    )
+    assert ("Fresh conversation with plain text" if command == "/new"
+            else "plain text (no agent)") in text
+    assert api.selected is None
+
+    # A chat simply on plain text gets no note.
+    tg = await run(msg(command), FakeApi(account="Acme Shipping (ops1)"))
+    assert "⚠️" not in tg.sent[-1][1]
+
+
+def test_a_gone_workflow_or_format_is_named_as_one():
+    assert S.active_gone("workflow", "Acme").startswith(
+        "⚠️ The workflow this chat was using is switched off or was deleted, so")
+    assert S.active_gone("format").startswith(
+        "⚠️ The format this chat was using was deleted or isn't on the account this chat")
 
 
 @pytest.mark.asyncio

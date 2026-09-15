@@ -110,11 +110,26 @@ REJECTED = "❌ Change rejected."
 ALREADY_RESOLVED = "Already resolved."
 
 
-def linked(name: str, email: str) -> str:
+def linked(name: str, account: str | None) -> str:
+    # The email, or "Acme Shipping (ops1)" for a company login (the Telegram
+    # module says why it follows a dash).
+    where = f" — {account}" if account else ""
     return (
-        f"🔗 Connected to *{name}* ({email}).\n"
+        f"🔗 Connected to *{name}*{where}.\n"
         "Send *agents* any time to switch, or just say *switch to <name>*."
     )
+
+
+def active_gone(kind: str, agents_of: str | None = None) -> str:
+    """Said before new's or status's reply when the chat's agent, format or
+    workflow can no longer be used, and the chat has just moved to plain text."""
+    if kind == "workflow":
+        what = "The workflow this chat was using is switched off or was deleted"
+    else:
+        where = f"*{agents_of}*" if agents_of else "the account this chat is connected to"
+        noun = "format" if kind == "format" else "agent"
+        what = f"The {noun} this chat was using was deleted or isn't on {where}"
+    return f"⚠️ {what}, so this chat now answers in plain text.\n"
 
 
 def agent_selected(name: str, turns: int, rotated: bool) -> str:
@@ -142,7 +157,7 @@ def pick_agent(agents_of: str | None = None) -> str:
 
 
 def status(account: str, agent: str | None, turns: int, agents_of: str | None = None) -> str:
-    # Left out when it would only repeat the email on the line above.
+    # Left out when it would only repeat the account on the line above.
     scope = f"*Agents from:* {agents_of}\n" if agents_of and agents_of != account else ""
     return (
         f"*Account:* {account}\n"

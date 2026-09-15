@@ -164,6 +164,13 @@ The menu header, `/status` and a failed `/agent <name>` name the account
 whose agents they show when the platform sends that label (`"account"`).
 A company seat sees the company's shared agents and a personal account only
 its own, so an agent missing from the menu is usually under the other one.
+Pairing and `/status` show that label in place of a company login's email,
+which is a placeholder under the reserved `.invalid` domain.
+
+When the chat's agent was deleted in the web app (or its ⚡ workflow switched
+off), `GET /api/bot/agents` returns no `active_preset_id` and sets `"active_gone"` to
+`"agent"`, `"format"` or `"workflow"`. `/new` and `/status` then move the chat
+to plain text, and their reply says why first.
 
 Every command in `/help` has to be registered in `scripts/set_webhook.py`
 (a test holds them together); rerun that script after changing the list.
