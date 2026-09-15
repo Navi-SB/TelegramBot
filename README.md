@@ -189,7 +189,10 @@ conversation", "switch to PMX Short", `/new`, `/agent <name>`), VoyageCalc
 reads the file as if it had no caption. It ends the reply with a line saying
 the chat did not start over or switch, and what to send on its own to do
 that. The caption is left out because the AI, told to answer those words with
-the command to send, did only that and never read the file.
+the command to send, did only that and never read the file. A caption that
+starts with such an ask and goes on ("/new pls in pmx format", "new
+conversation for this one pls") loses the ask the same way, and the rest of
+it goes with the file as the instruction.
 
 The bridge **fetches and forwards; it never reads**. Only it holds the
 Telegram and WhatsApp tokens, so it downloads the file and posts it to
