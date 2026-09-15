@@ -183,9 +183,13 @@ Every command in `/help` has to be registered in `scripts/set_webhook.py`
 
 Send a PDF (text or scanned) or a Word `.docx` — a Q88, a recap — with or
 without a caption. The caption is the instruction ("pmx format", "add these
-fixtures") and is never read as a command, so `/new` under a file is about
-the file. Nor is it read as a plain-words ask: VoyageCalc answers "new
-conversation" or "switch to PMX" under a file by reading the file.
+fixtures"), and the bridge never acts on it as a command. Nor does VoyageCalc
+act on it as a plain-words ask. When the caption is only such an ask ("new
+conversation", "switch to PMX Short", `/new`, `/agent <name>`), VoyageCalc
+reads the file as if it had no caption. It ends the reply with a line saying
+the chat did not start over or switch, and what to send on its own to do
+that. The caption is left out because the AI, told to answer those words with
+the command to send, did only that and never read the file.
 
 The bridge **fetches and forwards; it never reads**. Only it holds the
 Telegram and WhatsApp tokens, so it downloads the file and posts it to
