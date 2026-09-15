@@ -183,7 +183,7 @@ async def _redeem(ctx: Inbound, ch: Channel, api: PlatformClient) -> None:
         return
     user = res.get("user") or {}
     log("linked", chat_id=ctx.log_ref, user_id=user.get("id"))
-    await ch.send(ctx.chat_id, ch.S.linked(user.get("name", "your account"), user.get("email", "")))
+    await ch.send(ctx.chat_id, ch.S.linked(user.get("name") or "your account", _account(user, res)))
     await _show_agents(ctx, ch, api)
 
 
@@ -221,9 +221,22 @@ async def _status(ctx, ch, api, link) -> None:
     session = await api.set_session(ctx.chat_id, res.get("active_preset_id"))
     user = link.get("user") or {}
     await ch.send(ctx.chat_id, ch.S.status(
-        user.get("email", "unknown"), session.get("preset_name"), session.get("turns", 0),
-        agents_of=_agents_of(link, res),
+        _account(user, link, res) or "unknown", session.get("preset_name"),
+        session.get("turns", 0), agents_of=_agents_of(link, res),
     ))
+
+
+def _account(user: dict[str, Any], *payloads: dict[str, Any]) -> Optional[str]:
+    """What to call the account a chat is connected to: its email, or the
+    platform's label when the email is a placeholder. A company login keeps a
+    made-up address under the reserved .invalid domain (RFC 2606) that nobody
+    has ever seen, and "ops1@seat.invalid" in "Connected to" or on the status
+    Account line means nothing to its owner; the label says "Acme Shipping
+    (ops1)". None when there is neither."""
+    email = (user.get("email") or "").strip()
+    if email and not email.lower().endswith(".invalid"):
+        return email
+    return _agents_of(*payloads)
 
 
 def _agents_of(*payloads: dict[str, Any]) -> Optional[str]:

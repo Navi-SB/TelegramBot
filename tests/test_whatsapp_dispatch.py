@@ -11,7 +11,7 @@ from bot.whatsapp import strings as S
 from bot.whatsapp.api import WhatsAppError, WhatsAppUndeliverable, WhatsAppWindowClosed
 from bot.whatsapp.channel import WhatsAppChannel
 from bot.whatsapp.parse import parse_envelopes
-from tests.test_dispatch import FakeApi
+from tests.test_dispatch import SEAT, FakeApi
 from tests.test_wa_parse import NUM, text_msg, wa_body
 
 
@@ -169,6 +169,19 @@ async def test_status_names_whose_agents_the_chat_uses():
     wa = await run(text_msg("status"), FakeApi())
     assert "Agents from" not in wa.texts[-1][1]
     assert "*Account:* a@x.com" in wa.texts[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_pairing_and_status_name_a_company_login_by_company():
+    """Never the placeholder email a company login keeps (ops1@seat.invalid)."""
+    wa = await run(text_msg("LINK somecode"),
+                   FakeApi(linked=False, user=SEAT, account="Acme Shipping (ops1)"))
+    assert "seat.invalid" not in wa.all_text
+    assert wa.texts[0][1].startswith("🔗 Connected to *Olivia Ops* — Acme Shipping (ops1).\n")
+
+    wa = await run(text_msg("status"), FakeApi(user=SEAT, account="Acme Shipping (ops1)"))
+    assert "seat.invalid" not in wa.texts[-1][1]
+    assert wa.texts[-1][1].startswith("*Account:* Acme Shipping (ops1)\n*Agent:*")
 
 
 @pytest.mark.asyncio

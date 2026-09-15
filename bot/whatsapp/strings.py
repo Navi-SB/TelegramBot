@@ -110,9 +110,12 @@ REJECTED = "❌ Change rejected."
 ALREADY_RESOLVED = "Already resolved."
 
 
-def linked(name: str, email: str) -> str:
+def linked(name: str, account: str | None) -> str:
+    # The email, or "Acme Shipping (ops1)" for a company login (the Telegram
+    # module says why it follows a dash).
+    where = f" — {account}" if account else ""
     return (
-        f"🔗 Connected to *{name}* ({email}).\n"
+        f"🔗 Connected to *{name}*{where}.\n"
         "Send *agents* any time to switch, or just say *switch to <name>*."
     )
 
@@ -142,7 +145,7 @@ def pick_agent(agents_of: str | None = None) -> str:
 
 
 def status(account: str, agent: str | None, turns: int, agents_of: str | None = None) -> str:
-    # Left out when it would only repeat the email on the line above.
+    # Left out when it would only repeat the account on the line above.
     scope = f"*Agents from:* {agents_of}\n" if agents_of and agents_of != account else ""
     return (
         f"*Account:* {account}\n"

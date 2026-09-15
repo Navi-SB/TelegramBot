@@ -116,9 +116,14 @@ FULL_TEXT_SELECTED = (
 )
 
 
-def linked(name: str, email: str) -> str:
+def linked(name: str, account: str | None) -> str:
+    import html as _h
+
+    # The account is the email, or "Acme Shipping (ops1)" for a company login,
+    # which is why it follows a dash rather than sitting in brackets.
+    where = f" — {_h.escape(account, quote=False)}" if account else ""
     return (
-        f"🔗 Connected to <b>{name}</b> ({email}).\n"
+        f"🔗 Connected to <b>{_h.escape(name, quote=False)}</b>{where}.\n"
         "Switch agents any time with /agents, or just say "
         "“switch to &lt;name&gt;”."
     )
@@ -154,13 +159,13 @@ def pick_agent(agents_of: str | None = None) -> str:
 def status(account: str, agent: str | None, turns: int, agents_of: str | None = None) -> str:
     import html as _h
 
-    # Left out when it would only repeat the email on the line above.
+    # Left out when it would only repeat the account on the line above.
     scope = (
         f"<b>Agents from:</b> {_h.escape(agents_of, quote=False)}\n"
         if agents_of and agents_of != account else ""
     )
     return (
-        f"<b>Account:</b> {account}\n"
+        f"<b>Account:</b> {_h.escape(account, quote=False)}\n"
         + scope
         + f"<b>Agent:</b> {agent or 'plain text (no agent)'}\n"
         f"<b>Conversation:</b> {turns} message(s)"
