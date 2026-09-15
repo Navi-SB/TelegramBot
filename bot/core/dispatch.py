@@ -217,19 +217,31 @@ async def _active(api: PlatformClient, chat_id: str) -> Optional[str]:
 
 
 async def _status(ctx, ch, api, link) -> None:
-    session = await api.set_session(ctx.chat_id, await _active(api, ctx.chat_id))
+    res = await api.agents(ctx.chat_id)
+    session = await api.set_session(ctx.chat_id, res.get("active_preset_id"))
     user = link.get("user") or {}
     await ch.send(ctx.chat_id, ch.S.status(
-        user.get("email", "unknown"), session.get("preset_name"), session.get("turns", 0)
+        user.get("email", "unknown"), session.get("preset_name"), session.get("turns", 0),
+        agents_of=_agents_of(link, res),
     ))
 
 
+def _agents_of(*payloads: dict[str, Any]) -> Optional[str]:
+    """The platform's label for whose agents this chat sees — the company's
+    shared ones for a seat, the person's own otherwise. A chat linked to the
+    wrong one of the two can't offer the agent the user is looking for, and
+    nothing else in the chat says which it is. Older platforms send no label
+    and the text simply goes without it."""
+    return next((p["account"] for p in payloads if p.get("account")), None)
+
+
 async def _show_agents(ctx, ch, api, page: int = 0) -> None:
-    agents = (await api.agents(ctx.chat_id)).get("agents", [])
+    res = await api.agents(ctx.chat_id)
+    agents = res.get("agents", [])
     if not agents:
         await ch.send(ctx.chat_id, ch.S.NO_AGENTS)
         return
-    await ch.send_agent_picker(ctx.chat_id, agents, page, ch.S.PICK_AGENT)
+    await ch.send_agent_picker(ctx.chat_id, agents, page, ch.S.pick_agent(_agents_of(res)))
 
 
 async def _show_tools(ctx, ch, api) -> None:
@@ -257,7 +269,8 @@ async def _show_tools(ctx, ch, api) -> None:
 
 async def _select_by_name(ctx, ch, api) -> None:
     wanted = ctx.args.strip().lower()
-    agents = (await api.agents(ctx.chat_id)).get("agents", [])
+    res = await api.agents(ctx.chat_id)
+    agents = res.get("agents", [])
     if not wanted:
         await _show_agents(ctx, ch, api)
         return
@@ -269,7 +282,7 @@ async def _select_by_name(ctx, ch, api) -> None:
     elif hits:
         await ch.send_agent_picker(ctx.chat_id, hits, 0, ch.S.PICK_WHICH)
     else:
-        await ch.send(ctx.chat_id, ch.S.no_agent_match(ctx.args[:40]))
+        await ch.send(ctx.chat_id, ch.S.no_agent_match(ctx.args[:40], _agents_of(res)))
 
 
 async def _select(ctx, ch, api, preset_id: Optional[str]) -> None:
@@ -396,6 +409,18 @@ async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
             await ch.send_confirm_write(ctx.chat_id, pending)
         except Exception as exc:  # noqa: BLE001 — one lost card ≠ a lost turn
             log_exception("confirm_card_send_failed", exc, chat_id=ctx.log_ref)
+
+    if result.get("menu") == "agents":
+        # The platform answered a plain-words "list my agents" or a switch it
+        # couldn't settle on one name, and wants the tappable menu under its
+        # reply. The reply has already landed, so a failed menu is logged
+        # rather than reported: PLATFORM_DOWN would claim the message wasn't
+        # processed when it was. A platform that predates the key never
+        # sends it, and nothing changes.
+        try:
+            await _show_agents(ctx, ch, api)
+        except Exception as exc:  # noqa: BLE001 — a lost menu ≠ a lost turn
+            log_exception("agent_menu_send_failed", exc, chat_id=ctx.log_ref)
 
     log("turn_done", chat_id=ctx.log_ref, tools=result.get("tools_used"),
         chunks=len(chunks), outcome=result.get("stop_reason"))

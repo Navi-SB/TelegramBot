@@ -3,6 +3,10 @@
 handle_update is a pure function of (update, tg, api), which is what makes
 this testable without a bot token, a network, or Vercel.
 """
+import ast
+import re
+from pathlib import Path
+
 import pytest
 
 from bot import strings as S
@@ -47,8 +51,11 @@ class FakeTg:
 
 
 class FakeApi:
-    def __init__(self, *, linked=True, agents=None, turn=None, fail=None):
+    def __init__(self, *, linked=True, agents=None, turn=None, fail=None, account=None):
         self._linked = linked
+        # The platform's "whose agents are these" label; None is a platform
+        # that predates it, which sends no key at all.
+        self._account = account
         self._agents = agents or []
         self._turn = turn or {"reply": "hello", "vessel_outputs": [], "pending": [],
                               "tools_used": [], "stop_reason": "end_turn", "error": None}
@@ -61,8 +68,10 @@ class FakeApi:
         self.calls.append("get_link")
         if self._fail == "down":
             raise PlatformUnavailable(0, "ConnectError")
-        return {"linked": self._linked,
-                "user": {"id": "u1", "name": "Alex", "email": "a@x.com"}} if self._linked else {"linked": False}
+        if not self._linked:
+            return {"linked": False}
+        link = {"linked": True, "user": {"id": "u1", "name": "Alex", "email": "a@x.com"}}
+        return {**link, "account": self._account} if self._account else link
 
     async def redeem(self, chat_id, code, tg_user_id, name):
         self.calls.append("redeem")
@@ -72,7 +81,8 @@ class FakeApi:
 
     async def agents(self, chat_id):
         self.calls.append("agents")
-        return {"agents": self._agents, "active_preset_id": None}
+        res = {"agents": self._agents, "active_preset_id": None}
+        return {**res, "account": self._account} if self._account else res
 
     async def set_session(self, chat_id, preset_id=None, *, new_thread=False):
         self.calls.append("set_session")
@@ -174,6 +184,24 @@ async def test_help_needs_no_network():
     assert api.calls == []
 
 
+def test_help_says_how_to_switch_agents_by_name():
+    assert "/agent &lt;name&gt;" in S.HELP
+    assert "switch to &lt;name&gt;" in S.HELP
+
+
+def test_every_command_help_lists_is_in_the_telegram_command_menu():
+    """The menu Telegram shows when you type '/' is registered by
+    scripts/set_webhook.py; a command missing there is one most users never
+    find. Read as source because running that module talks to Telegram."""
+    tree = ast.parse((Path(__file__).parents[1] / "scripts" / "set_webhook.py").read_text())
+    commands = next(ast.literal_eval(node.value) for node in tree.body
+                    if isinstance(node, ast.Assign) and node.targets[0].id == "COMMANDS")
+    registered = {c["command"] for c in commands}
+    in_help = set(re.findall(r"^/(\w+)", S.HELP, re.M))
+    assert "agent" in in_help
+    assert in_help <= registered
+
+
 @pytest.mark.asyncio
 async def test_a_photo_gets_a_useful_refusal():
     u = msg("")
@@ -214,6 +242,79 @@ async def test_agent_by_name_is_case_insensitive():
     api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
     await run(msg("/agent freight desk"), api)
     assert api.selected == "a1"
+
+
+@pytest.mark.asyncio
+async def test_every_confirmation_says_how_to_switch_later():
+    """The menu only shows up by itself right after linking; each of these is
+    the moment a user learns there is a way back to it."""
+    api = FakeApi(linked=False, agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    tg = await run(msg("/start somecode"), api)
+    assert "/agents" in tg.sent[0][1]                   # the "Connected" message itself
+
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    for command in ("/agent freight desk", "/new"):
+        tg = await run(msg(command), api)
+        assert S.SWITCH_HINT in tg.sent[-1][1], command
+
+    tg = await run(cb(encode("a", "-")), api)
+    assert S.SWITCH_HINT in tg.sent[-1][1]              # Full text is a choice too
+
+
+@pytest.mark.asyncio
+async def test_the_agent_menu_says_whose_agents_it_is_showing():
+    """A chat linked to a personal account can't offer an agent that lives in
+    the company's shared agents. Naming the account makes that visible."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}],
+                  account="Acme <Shipping> & Co")
+    tg = await run(msg("/agents"), api)
+    assert tg.sent[-1][1] == S.pick_agent("Acme <Shipping> & Co")
+    assert "Showing the agents for Acme &lt;Shipping&gt; &amp; Co." in tg.sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_the_agent_menu_goes_without_an_account_a_platform_doesnt_send():
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}])
+    tg = await run(msg("/agents"), api)
+    assert tg.sent[-1][1] == S.PICK_AGENT
+
+
+@pytest.mark.asyncio
+async def test_status_names_whose_agents_the_chat_uses():
+    tg = await run(msg("/status"), FakeApi(account="Acme Shipping"))
+    assert "<b>Agents from:</b> Acme Shipping" in tg.sent[-1][1]
+    assert "<b>Account:</b> a@x.com" in tg.sent[-1][1]
+
+    tg = await run(msg("/status"), FakeApi())
+    assert "Agents from" not in tg.sent[-1][1]
+    assert "<b>Account:</b> a@x.com" in tg.sent[-1][1]
+
+    # A personal account labelled by its email would only say it twice.
+    tg = await run(msg("/status"), FakeApi(account="a@x.com"))
+    assert "Agents from" not in tg.sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_status_takes_the_account_from_the_agent_list_when_the_link_has_none():
+    class Api(FakeApi):
+        async def get_link(self, chat_id):
+            link = await super().get_link(chat_id)
+            return {k: v for k, v in link.items() if k != "account"}
+
+    tg = await run(msg("/status"), Api(account="Acme Shipping"))
+    assert "<b>Agents from:</b> Acme Shipping" in tg.sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_no_agent_match_names_the_account_it_searched():
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}],
+                  account="alex@personal.com")
+    tg = await run(msg("/agent PMX Short"), api)
+    assert tg.sent[-1][1] == (
+        "No agent matches <b>PMX Short</b> in the agents for "
+        "<b>alex@personal.com</b>. Try /agents."
+    )
+    assert api.selected is None
 
 
 @pytest.mark.asyncio
@@ -297,6 +398,47 @@ async def test_outputs_rendered_before_a_late_error_still_ship():
     tg = await run(msg("concordia with current prices"), api)
     assert "Singapore bunker prices" in tg.edits[0][1]  # card replaces placeholder
     assert "APIError" in tg.sent[-1][1]  # the error follows as its own message
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_asks_for_the_agent_menu_shows_it_under_the_reply():
+    """'list my agents' in plain words: the platform answers and asks for the
+    tappable menu, so the user never has to learn /agents to use it."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}],
+                  turn={"reply": "Your agents: Freight Desk.", "vessel_outputs": [],
+                        "pending": [], "tools_used": [], "stop_reason": "agent_menu",
+                        "error": None, "menu": "agents"})
+    tg = await run(msg("list my agents"), api)
+    assert "Your agents: Freight Desk." in tg.edits[0][1]  # the reply first
+    assert tg.sent[-1][1] == S.PICK_AGENT                   # then the menu
+    buttons = [b["text"] for row in tg.keyboards[-1]["inline_keyboard"] for b in row]
+    assert "Freight Desk" in buttons
+    assert api.calls.index("turn") < api.calls.index("agents")
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_a_menu_request_shows_no_menu():
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    tg = await run(msg("how many panamaxes?"), api)
+    assert tg.keyboards == []
+    assert "agents" not in api.calls
+
+
+@pytest.mark.asyncio
+async def test_a_menu_that_fails_to_load_does_not_disown_the_delivered_reply():
+    """The reply already landed; 'your message wasn't processed' would be a
+    lie that invites a resend."""
+    class Api(FakeApi):
+        async def agents(self, chat_id):
+            raise PlatformUnavailable(0, "ReadTimeout")
+
+    api = Api(turn={"reply": "Your agents: Freight Desk.", "vessel_outputs": [],
+                    "pending": [], "tools_used": [], "stop_reason": "agent_menu",
+                    "error": None, "menu": "agents"})
+    tg = await run(msg("list my agents"), api)
+    assert "Your agents: Freight Desk." in tg.edits[0][1]
+    assert S.PLATFORM_DOWN not in tg.all_text
+    assert S.UNEXPECTED not in tg.all_text
 
 
 # ---------------------------------------------------------------------------

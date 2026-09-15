@@ -30,11 +30,13 @@ HELP = (
     "*Tropis assistant*\n\n"
     "Just send a message to talk to your agent.\n\n"
     "*agents* — pick which of your agents to talk to\n"
+    "*/agent <name>* or *switch to <name>* — go straight to an agent by name\n"
     "*short* — turn a pasted vessel description into a broker short description\n"
     "*new* — start a fresh conversation with the current agent\n"
     "*status* — what I'm connected to\n"
     "*unlink* — disconnect this chat\n"
     "*help* — this message\n\n"
+    "Plain words work too: “list my agents”, “new conversation”.\n\n"
     "_Library management — tags, favourites and columns — is web-app only._"
 )
 
@@ -80,7 +82,13 @@ NO_AGENTS = (
     "plain text."
 )
 
-FULL_TEXT_SELECTED = "📄 Now answering in *plain text* — no agent formatting."
+# The way back to the menu, said wherever a choice is confirmed (the Telegram
+# module says why). The bare word the parser accepts, as there is no menu here.
+SWITCH_HINT = "Send *agents* any time to switch."
+
+FULL_TEXT_SELECTED = (
+    "📄 Now answering in *plain text* — no agent formatting.\n" + SWITCH_HINT
+)
 
 PICK_AGENT = "Which agent should I use?"
 
@@ -103,24 +111,43 @@ ALREADY_RESOLVED = "Already resolved."
 
 
 def linked(name: str, email: str) -> str:
-    return f"🔗 Connected to *{name}* ({email})."
+    return (
+        f"🔗 Connected to *{name}* ({email}).\n"
+        "Send *agents* any time to switch, or just say *switch to <name>*."
+    )
 
 
 def agent_selected(name: str, turns: int, rotated: bool) -> str:
     if rotated or turns == 0:
-        return f"● Now talking to *{name}* — starting a fresh conversation."
-    return f"● Now talking to *{name}* — resuming your {turns}-message conversation."
+        head = f"● Now talking to *{name}* — starting a fresh conversation."
+    else:
+        head = f"● Now talking to *{name}* — resuming your {turns}-message conversation."
+    return f"{head}\n{SWITCH_HINT}"
 
 
 def new_thread(name: str | None) -> str:
     who = f"*{name}*" if name else "plain text"
-    return f"🆕 Fresh conversation with {who}. The previous one is still in the web app."
+    return (
+        f"🆕 Fresh conversation with {who}. The previous one is still in the web app.\n"
+        + SWITCH_HINT
+    )
 
 
-def status(account: str, agent: str | None, turns: int) -> str:
+def pick_agent(agents_of: str | None = None) -> str:
+    """The agent menu's header, naming whose agents these are when the
+    platform says (the Telegram module says why)."""
+    if not agents_of:
+        return PICK_AGENT
+    return f"{PICK_AGENT}\n_Showing the agents for {agents_of}._"
+
+
+def status(account: str, agent: str | None, turns: int, agents_of: str | None = None) -> str:
+    # Left out when it would only repeat the email on the line above.
+    scope = f"*Agents from:* {agents_of}\n" if agents_of and agents_of != account else ""
     return (
         f"*Account:* {account}\n"
-        f"*Agent:* {agent or 'plain text (no agent)'}\n"
+        + scope
+        + f"*Agent:* {agent or 'plain text (no agent)'}\n"
         f"*Conversation:* {turns} message(s)"
     )
 
@@ -138,8 +165,9 @@ def tool_selected(name: str) -> str:
     )
 
 
-def no_agent_match(query: str) -> str:
-    return f"No agent matches *{query}*. Send *agents* to see the list."
+def no_agent_match(query: str, agents_of: str | None = None) -> str:
+    where = f" in the agents for *{agents_of}*" if agents_of else ""
+    return f"No agent matches *{query}*{where}. Send *agents* to see the list."
 
 
 def confirm_failed(detail: str) -> str:

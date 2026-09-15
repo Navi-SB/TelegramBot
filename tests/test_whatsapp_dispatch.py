@@ -149,6 +149,43 @@ async def test_a_bare_agents_word_opens_the_list_picker():
 
 
 @pytest.mark.asyncio
+async def test_the_agent_list_says_whose_agents_it_is_showing():
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}],
+                  account="Acme Shipping")
+    wa = await run(text_msg("agents"), api)
+    (_, body, _), = wa.lists
+    assert body == "Which agent should I use?\n_Showing the agents for Acme Shipping._"
+
+    wa = await run(text_msg("agents"), FakeApi(agents=api._agents))
+    (_, body, _), = wa.lists
+    assert body == S.PICK_AGENT
+
+
+@pytest.mark.asyncio
+async def test_status_names_whose_agents_the_chat_uses():
+    wa = await run(text_msg("status"), FakeApi(account="Acme Shipping"))
+    assert "*Agents from:* Acme Shipping" in wa.texts[-1][1]
+
+    wa = await run(text_msg("status"), FakeApi())
+    assert "Agents from" not in wa.texts[-1][1]
+    assert "*Account:* a@x.com" in wa.texts[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_no_agent_match_names_the_account_it_searched():
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}],
+                  account="alex@personal.com")
+    wa = await run(text_msg("/agent PMX Short"), api)
+    assert wa.texts[-1][1] == (
+        "No agent matches *PMX Short* in the agents for *alex@personal.com*. "
+        "Send *agents* to see the list."
+    )
+
+    wa = await run(text_msg("/agent PMX Short"), FakeApi(agents=api._agents))
+    assert wa.texts[-1][1] == "No agent matches *PMX Short*. Send *agents* to see the list."
+
+
+@pytest.mark.asyncio
 async def test_multi_word_messages_go_to_the_agent_not_the_command_router():
     api = FakeApi()
     await run(text_msg("new fixture for MV OCEAN STAR"), api)
@@ -161,6 +198,40 @@ async def test_help_needs_no_network():
     wa = await run(text_msg("help"), api)
     assert "Tropis assistant" in wa.all_text
     assert api.calls == []
+
+
+def test_help_says_how_to_switch_agents_by_name():
+    """Both ways: the assistant is told /agent <name> works here, and it is
+    the one the bridge reads itself, whatever the platform recognises."""
+    assert "*switch to <name>*" in S.HELP
+    assert "*/agent <name>*" in S.HELP
+
+
+@pytest.mark.asyncio
+async def test_agent_and_a_name_without_the_slash_is_a_message_not_a_command():
+    """'agent confirms berthing tomorrow' is a real message in this trade.
+    'switch to <name>' is recognised by the platform, inside the turn."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    await run(text_msg("agent Freight Desk"), api)
+    assert "turn" in api.calls
+    assert api.selected is None
+
+
+@pytest.mark.asyncio
+async def test_every_confirmation_names_the_bare_word_that_opens_the_menu():
+    api = FakeApi(linked=False, agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    wa = await run(text_msg("LINK somecode"), api)
+    assert "*agents*" in wa.texts[0][1]
+
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    for message in (text_msg("/agent freight desk"), text_msg("new"),
+                    interactive("list_reply", encode("a", "-"))):
+        wa = await run(message, api)
+        assert S.SWITCH_HINT in wa.texts[-1][1]
+
+    # ...and the word it names really is a command here.
+    [ctx] = parse_envelopes(wa_body([text_msg("agents")]))
+    assert ctx.command == "agents"
 
 
 @pytest.mark.asyncio
@@ -218,6 +289,28 @@ async def test_a_write_proposal_becomes_reply_buttons():
     assert "vessel: MV A" in body               # the card shows the actual diff
     ids = [i for i, _ in buttons]
     assert encode("w", "y", "p1") in ids
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_asks_for_the_agent_menu_sends_the_list_after_the_reply():
+    """Same flow as Telegram through the channel abstraction: the reply goes
+    out as text, then the list message the user taps to switch."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}],
+                  turn=turn_result(reply="No agent called PMX here.",
+                                   stop_reason="agent_menu", menu="agents"))
+    wa = await run(text_msg("switch to PMX"), api)
+    assert "No agent called PMX here." in wa.texts[0][1]
+    (_, body, rows), = wa.lists
+    assert body == S.PICK_AGENT
+    assert "Freight Desk" in [r["title"] for r in rows]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_a_menu_request_sends_no_list():
+    api = FakeApi(turn=turn_result(reply="You have 12 Panamaxes."))
+    wa = await run(text_msg("how many panamaxes?"), api)
+    assert wa.lists == []
+    assert "agents" not in api.calls
 
 
 # ---------------------------------------------------------------------------
