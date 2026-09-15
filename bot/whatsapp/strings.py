@@ -30,11 +30,13 @@ HELP = (
     "*Tropis assistant*\n\n"
     "Just send a message to talk to your agent.\n\n"
     "*agents* — pick which of your agents to talk to\n"
+    "*switch to <name>* — go straight to an agent by name\n"
     "*short* — turn a pasted vessel description into a broker short description\n"
     "*new* — start a fresh conversation with the current agent\n"
     "*status* — what I'm connected to\n"
     "*unlink* — disconnect this chat\n"
     "*help* — this message\n\n"
+    "Plain words work too: “list my agents”, “new conversation”.\n\n"
     "_Library management — tags, favourites and columns — is web-app only._"
 )
 
@@ -80,7 +82,13 @@ NO_AGENTS = (
     "plain text."
 )
 
-FULL_TEXT_SELECTED = "📄 Now answering in *plain text* — no agent formatting."
+# The way back to the menu, said wherever a choice is confirmed (the Telegram
+# module says why). The bare word the parser accepts, as there is no menu here.
+SWITCH_HINT = "Send *agents* any time to switch."
+
+FULL_TEXT_SELECTED = (
+    "📄 Now answering in *plain text* — no agent formatting.\n" + SWITCH_HINT
+)
 
 PICK_AGENT = "Which agent should I use?"
 
@@ -103,18 +111,26 @@ ALREADY_RESOLVED = "Already resolved."
 
 
 def linked(name: str, email: str) -> str:
-    return f"🔗 Connected to *{name}* ({email})."
+    return (
+        f"🔗 Connected to *{name}* ({email}).\n"
+        "Send *agents* any time to switch, or just say *switch to <name>*."
+    )
 
 
 def agent_selected(name: str, turns: int, rotated: bool) -> str:
     if rotated or turns == 0:
-        return f"● Now talking to *{name}* — starting a fresh conversation."
-    return f"● Now talking to *{name}* — resuming your {turns}-message conversation."
+        head = f"● Now talking to *{name}* — starting a fresh conversation."
+    else:
+        head = f"● Now talking to *{name}* — resuming your {turns}-message conversation."
+    return f"{head}\n{SWITCH_HINT}"
 
 
 def new_thread(name: str | None) -> str:
     who = f"*{name}*" if name else "plain text"
-    return f"🆕 Fresh conversation with {who}. The previous one is still in the web app."
+    return (
+        f"🆕 Fresh conversation with {who}. The previous one is still in the web app.\n"
+        + SWITCH_HINT
+    )
 
 
 def status(account: str, agent: str | None, turns: int) -> str:

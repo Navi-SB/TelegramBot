@@ -3,6 +3,10 @@
 handle_update is a pure function of (update, tg, api), which is what makes
 this testable without a bot token, a network, or Vercel.
 """
+import ast
+import re
+from pathlib import Path
+
 import pytest
 
 from bot import strings as S
@@ -174,6 +178,24 @@ async def test_help_needs_no_network():
     assert api.calls == []
 
 
+def test_help_says_how_to_switch_agents_by_name():
+    assert "/agent &lt;name&gt;" in S.HELP
+    assert "switch to &lt;name&gt;" in S.HELP
+
+
+def test_every_command_help_lists_is_in_the_telegram_command_menu():
+    """The menu Telegram shows when you type '/' is registered by
+    scripts/set_webhook.py; a command missing there is one most users never
+    find. Read as source because running that module talks to Telegram."""
+    tree = ast.parse((Path(__file__).parents[1] / "scripts" / "set_webhook.py").read_text())
+    commands = next(ast.literal_eval(node.value) for node in tree.body
+                    if isinstance(node, ast.Assign) and node.targets[0].id == "COMMANDS")
+    registered = {c["command"] for c in commands}
+    in_help = set(re.findall(r"^/(\w+)", S.HELP, re.M))
+    assert "agent" in in_help
+    assert in_help <= registered
+
+
 @pytest.mark.asyncio
 async def test_a_photo_gets_a_useful_refusal():
     u = msg("")
@@ -214,6 +236,23 @@ async def test_agent_by_name_is_case_insensitive():
     api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
     await run(msg("/agent freight desk"), api)
     assert api.selected == "a1"
+
+
+@pytest.mark.asyncio
+async def test_every_confirmation_says_how_to_switch_later():
+    """The menu only shows up by itself right after linking; each of these is
+    the moment a user learns there is a way back to it."""
+    api = FakeApi(linked=False, agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    tg = await run(msg("/start somecode"), api)
+    assert "/agents" in tg.sent[0][1]                   # the "Connected" message itself
+
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    for command in ("/agent freight desk", "/new"):
+        tg = await run(msg(command), api)
+        assert S.SWITCH_HINT in tg.sent[-1][1], command
+
+    tg = await run(cb(encode("a", "-")), api)
+    assert S.SWITCH_HINT in tg.sent[-1][1]              # Full text is a choice too
 
 
 @pytest.mark.asyncio

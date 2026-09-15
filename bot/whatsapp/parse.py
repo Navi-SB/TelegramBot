@@ -10,6 +10,10 @@ Command grammar, since WhatsApp has no /command menu:
   - a single bare word (agents / new / status / unlink / help / menu) is a
     command; anything multi-word is a message for the agent — "new fixture
     for MV X" must never be swallowed
+  - so "agent <name>" without the slash is NOT a command either: "agent
+    confirms berthing tomorrow" is a real message in this trade. Switching by
+    name is "/agent <name>", or plain "switch to <name>", which the platform
+    recognises on its own before any AI runs
 """
 from __future__ import annotations
 

@@ -19,6 +19,7 @@ ALLOWED = ["message", "callback_query", "my_chat_member"]
 
 COMMANDS = [
     {"command": "agents", "description": "Pick which agent to talk to"},
+    {"command": "agent", "description": "Switch to an agent by name, e.g. /agent PMX Short"},
     {"command": "short", "description": "Short description from a pasted vessel description"},
     {"command": "new", "description": "Start a fresh conversation"},
     {"command": "status", "description": "What I'm connected to"},

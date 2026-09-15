@@ -163,6 +163,37 @@ async def test_help_needs_no_network():
     assert api.calls == []
 
 
+def test_help_says_how_to_switch_agents_by_name():
+    assert "*switch to <name>*" in S.HELP
+
+
+@pytest.mark.asyncio
+async def test_agent_and_a_name_without_the_slash_is_a_message_not_a_command():
+    """'agent confirms berthing tomorrow' is a real message in this trade.
+    'switch to <name>' is recognised by the platform, inside the turn."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    await run(text_msg("agent Freight Desk"), api)
+    assert "turn" in api.calls
+    assert api.selected is None
+
+
+@pytest.mark.asyncio
+async def test_every_confirmation_names_the_bare_word_that_opens_the_menu():
+    api = FakeApi(linked=False, agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    wa = await run(text_msg("LINK somecode"), api)
+    assert "*agents*" in wa.texts[0][1]
+
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    for message in (text_msg("/agent freight desk"), text_msg("new"),
+                    interactive("list_reply", encode("a", "-"))):
+        wa = await run(message, api)
+        assert S.SWITCH_HINT in wa.texts[-1][1]
+
+    # ...and the word it names really is a command here.
+    [ctx] = parse_envelopes(wa_body([text_msg("agents")]))
+    assert ctx.command == "agents"
+
+
 @pytest.mark.asyncio
 async def test_media_gets_a_useful_refusal():
     msg = {"from": NUM, "id": "wamid.M1", "type": "image", "image": {"id": "m1"}}
