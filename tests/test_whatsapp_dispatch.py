@@ -537,6 +537,18 @@ async def test_an_old_platform_says_files_are_not_supported_yet():
 
 
 @pytest.mark.asyncio
+async def test_a_proxy_refusing_the_upload_says_the_file_was_not_passed_on():
+    class ProxiedApi(FakeApi):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
+            raise PlatformError(413, "Request Entity Too Large")
+
+    wa = FileWa()
+    await run(wa_doc(), ProxiedApi(), wa)
+    assert S.FILE_NOT_DELIVERED in wa.all_text
+    assert S.FILE_TOO_LARGE not in wa.all_text
+
+
+@pytest.mark.asyncio
 async def test_the_access_token_never_reaches_errors_or_logs(caplog):
     """End to end over a real client: the download blows up with a transport
     error that names the URL and the auth header, the way a careless proxy
@@ -572,6 +584,6 @@ async def test_the_access_token_never_reaches_errors_or_logs(caplog):
 
 
 def test_whatsapp_file_strings_state_the_cap_and_how_to_send():
-    assert f"{MAX_BYTES // 1_000_000} MB" in S.FILE_TOO_LARGE
+    assert f"{MAX_BYTES // (1024 * 1024)} MB" in S.FILE_TOO_LARGE
     assert "PDF or Word file" in S.HELP and "caption" in S.HELP
     assert "PDF" in S.TEXT_ONLY and ".docx" in S.TEXT_ONLY

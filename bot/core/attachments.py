@@ -27,9 +27,13 @@ from typing import Any, Optional
 
 import httpx
 
-# Mirrors VoyageCalc's own cap on /api/bot/turn. The backend enforces it too;
-# this copy exists so an oversize file is refused without being downloaded.
-MAX_BYTES = 5_000_000
+# VoyageCalc's own cap on /api/bot/turn, which is also its Short Description
+# page's (attachments.MAX_ATTACHMENT_BYTES there): 5 MiB, what phones and
+# Windows show as "5 MB". The backend enforces it too; this copy exists so an
+# oversize file is refused without being downloaded. It was 5,000,000 here
+# once, and a file that uploaded on the web page was refused by both bots, so
+# a test on each side pins the number.
+MAX_BYTES = 5 * 1024 * 1024
 
 _MAX_NAME = 255
 _MAX_MIME = 100

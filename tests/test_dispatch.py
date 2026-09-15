@@ -520,6 +520,22 @@ async def test_an_old_platform_rejecting_the_file_says_files_are_not_supported_y
 
 
 @pytest.mark.asyncio
+async def test_a_proxy_refusing_the_upload_is_not_blamed_on_the_files_size(caplog):
+    """Nothing over the cap is ever sent, so a 413 is the proxy in front of
+    the platform (nginx refuses 1 MB bodies by default), not the file."""
+    caplog.set_level(logging.INFO, logger="tropis.bot")
+
+    class ProxiedApi(FakeApi):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
+            raise PlatformError(413, "Request Entity Too Large")
+
+    tg = await run(doc(), ProxiedApi(), FileTg())
+    assert S.FILE_NOT_DELIVERED in tg.edits[0][1]
+    assert S.FILE_TOO_LARGE not in tg.all_text
+    assert "upload_413" in logged(caplog)
+
+
+@pytest.mark.asyncio
 async def test_a_file_the_platform_cannot_read_is_answered_like_any_reply():
     reason = "That's an old Word .doc — save it as .docx or PDF and send it again."
     api = FakeApi(turn={"reply": reason, "vessel_outputs": [], "pending": [],
@@ -576,7 +592,14 @@ async def test_a_gif_is_refused_even_though_telegram_also_calls_it_a_document():
 
 
 def test_the_size_message_states_the_real_cap():
-    assert f"{MAX_BYTES // 1_000_000} MB" in S.FILE_TOO_LARGE
+    assert f"{MAX_BYTES // (1024 * 1024)} MB" in S.FILE_TOO_LARGE
+
+
+def test_the_cap_is_the_number_voyagecalc_allows():
+    """VoyageCalc's attachments.MAX_ATTACHMENT_BYTES is pinned to the same 5 MiB
+    by its own test, and is its web page's cap too. At 5,000,000 here a file
+    that uploaded on the page was refused by both bots, all saying "5 MB"."""
+    assert MAX_BYTES == 5 * 1024 * 1024
 
 
 def test_help_says_files_can_be_sent_with_a_caption():

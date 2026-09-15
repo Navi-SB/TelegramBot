@@ -185,9 +185,11 @@ it like any other answer. Text turns send no `attachment` key at all.
 
 The rules, all in `bot/core/`:
 
-- **5 MB cap** (`attachments.MAX_BYTES`). A file *declared* bigger is refused
-  without downloading; the download itself streams and stops the moment it
-  passes the cap, because declared sizes and `Content-Length` are hints.
+- **5 MB cap** (`attachments.MAX_BYTES`, 5 MiB — exactly VoyageCalc's
+  `attachments.MAX_ATTACHMENT_BYTES`, which its web page uses too; a test on
+  each side pins it). A file *declared* bigger is refused without
+  downloading; the download itself streams and stops the moment it passes
+  the cap, because declared sizes and `Content-Length` are hints.
   Telegram's cloud Bot API can't hand out files over 20 MB at all — that
   also reads as "too big".
 - **Linked chats only.** The file is fetched after the link check, so an
@@ -195,12 +197,17 @@ The rules, all in `bot/core/`:
 - **Inside the turn deadline.** The download gets at most half of it (and
   never more than 60 s); whatever it uses comes off the backend call.
 - **Every failure has its own message**: too large, couldn't download
-  (retry), and — for an old backend that 422s a file turn — "can't read
-  files here yet". Photos, voice notes, stickers, GIFs and the rest still get
-  the text-only nudge, now naming what *does* work.
-- **Deploy VoyageCalc first.** An old backend ignores the unknown
-  `attachment` key: a caption-less file 422s (and says "not yet"), but a
-  captioned one would be answered as if only the caption had been sent.
+  (retry), couldn't pass it on (a 413 from a proxy in front of the backend —
+  never the file's size, since nothing over the cap is sent), and — for an
+  old backend that 422s a file turn — "can't read files here yet". Photos,
+  voice notes, stickers, GIFs and the rest still get the text-only nudge,
+  now naming what *does* work.
+- **Deploy VoyageCalc first, and raise its proxy's body limit.** An old
+  backend ignores the unknown `attachment` key: a caption-less file 422s (and
+  says "not yet"), but a captioned one would be answered as if only the
+  caption had been sent. A 5 MiB file is ~7 MB of JSON, and nginx refuses
+  anything over 1 MB unless `client_max_body_size` says otherwise — see
+  VoyageCalc's `deploy/nav-81-sent-files.md`.
 
 ---
 

@@ -62,6 +62,13 @@ FILE_UNAVAILABLE = (
     "processed</b> — try sending it again."
 )
 
+# The platform's proxy refused the upload (a 413) although the file is within
+# the cap: a deployment limit, not something a smaller file would fix.
+FILE_NOT_DELIVERED = (
+    "📄 I couldn't pass that file on to Tropis. <b>It wasn't processed</b> — "
+    "try again later, or paste the text."
+)
+
 FILES_NOT_SUPPORTED_YET = (
     "📄 I can't read files here yet — the platform needs an update first. "
     "Paste the text for now."
