@@ -521,8 +521,8 @@ async def test_an_old_platform_rejecting_the_file_says_files_are_not_supported_y
 
 @pytest.mark.asyncio
 async def test_a_proxy_refusing_the_upload_is_not_blamed_on_the_files_size(caplog):
-    """Nothing over the cap is ever sent, so a 413 is the proxy in front of
-    the platform (nginx refuses 1 MB bodies by default), not the file."""
+    """Nothing over the cap is ever sent, so a 413 is a body limit in the
+    proxy in front of the platform, not the file."""
     caplog.set_level(logging.INFO, logger="tropis.bot")
 
     class ProxiedApi(FakeApi):

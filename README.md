@@ -205,12 +205,13 @@ The rules, all in `bot/core/`:
   old backend that 422s a file turn — "can't read files here yet". Photos,
   voice notes, stickers, GIFs and the rest still get the text-only nudge,
   now naming what *does* work.
-- **Deploy VoyageCalc first, and raise its proxy's body limit.** An old
+- **Deploy VoyageCalc first, and check its proxy's body limit.** An old
   backend ignores the unknown `attachment` key: a caption-less file 422s (and
   says "not yet"), but a captioned one would be answered as if only the
-  caption had been sent. A 5 MiB file is ~7 MB of JSON, and nginx refuses
-  anything over 1 MB unless `client_max_body_size` says otherwise — see
-  VoyageCalc's `deploy/nav-81-sent-files.md`.
+  caption had been sent. A 5 MiB file is ~7 MB of JSON, so any body limit in
+  front of VoyageCalc must allow that. Its Caddy sets none today;
+  VoyageCalc's `deploy/nav-81-sent-files.md` shows how to check, and the
+  `8MB` to use if one is added.
 
 ---
 
