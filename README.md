@@ -146,11 +146,27 @@ a rewrite — and developing locally keeps it honest.
 |---|---|
 | *(any message)* | ask the current agent |
 | `/agents` | pick which of your agents to use |
-| `/agent <name>` | pick by name |
+| `/agent <name>` | pick by name (exact first, then partial) |
+| `/short` | pick a short-description format, then paste vessel descriptions |
 | `/new` | fresh conversation with the current agent |
-| `/status` | account, agent, conversation length |
+| `/status` | account, whose agents, agent, conversation length |
 | `/unlink` | disconnect this chat (two-step) |
 | `/help` | answered with no network call |
+
+Plain words work too, in every mode (an agent, Full text, `/short`, a ⚡
+workflow): "switch to PMX Short", "list my agents", "new conversation".
+VoyageCalc recognises those inside `/api/bot/turn` before any AI runs, so
+they are not billed as turns and the bridge needs no parser for them. When
+a request doesn't settle on one agent, the turn result carries
+`"menu": "agents"` and the bridge opens the agent menu under the reply.
+
+The menu header, `/status` and a failed `/agent <name>` name the account
+whose agents they show when the platform sends that label (`"account"`).
+A company seat sees the company's shared agents and a personal account only
+its own, so an agent missing from the menu is usually under the other one.
+
+Every command in `/help` has to be registered in `scripts/set_webhook.py`
+(a test holds them together); rerun that script after changing the list.
 
 ---
 
@@ -186,7 +202,7 @@ What differs from Telegram, by design:
 | | Telegram | WhatsApp |
 |---|---|---|
 | Pairing | `t.me/...?start=<code>` deep link | `wa.me/<number>?text=LINK <code>` prefill — the user must press Send |
-| Commands | `/commands` menu | bare words (`agents`, `new`, `status`, `unlink`, `help`); `/forms` still accepted; multi-word text is never swallowed |
+| Commands | `/commands` menu | bare words (`agents`, `short`, `new`, `status`, `unlink`, `help`); `/forms` still accepted, so `/agent <name>` works; multi-word text is never swallowed, `agent <name>` included — "switch to <name>" is the plain-words way |
 | Progress | "⏳ Thinking…" edited into the answer | read receipt + typing indicator, then buffered sends (no edit API exists) |
 | Menus | inline keyboards, 8/page | list message, 10-row ceiling: 7 agents + Full text + nav |
 | Confirm cards | ≤3500 chars under the keyboard | ≤950 chars (interactive body caps at 1024) |
