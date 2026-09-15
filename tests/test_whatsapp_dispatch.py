@@ -537,6 +537,19 @@ async def test_an_old_platform_says_files_are_not_supported_yet():
 
 
 @pytest.mark.asyncio
+async def test_files_sent_faster_than_the_platform_takes_them_are_told_to_wait():
+    class BusyApi(FakeApi):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
+            raise PlatformError(429, "too_many_attempts", retry_after=42)
+
+    wa = FileWa()
+    await run(wa_doc(), BusyApi(), wa)
+    assert S.rate_limited("a minute", daily=False, file=True) in wa.all_text
+    assert "*that file wasn't read*" in wa.all_text
+    assert S.UNEXPECTED not in wa.all_text
+
+
+@pytest.mark.asyncio
 async def test_a_proxy_refusing_the_upload_says_the_file_was_not_passed_on():
     class ProxiedApi(FakeApi):
         async def turn(self, chat_id, content, *, attachment=None, timeout):

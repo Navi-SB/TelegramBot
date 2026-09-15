@@ -205,6 +205,12 @@ The rules, all in `bot/core/`:
   old backend that 422s a file turn — "can't read files here yet". Photos,
   voice notes, stickers, GIFs and the rest still get the text-only nudge,
   now naming what *does* work.
+- **Too many at once waits, it didn't break.** VoyageCalc takes 6 messages a
+  minute per chat, and 7 or more files selected together pass that. Each
+  file is its own update, so the 7th and later are downloaded and then
+  turned away with a 429. They get "that file wasn't read, send it again in
+  a minute", not "something went wrong". A 429 with a Retry-After of hours
+  is the daily limit, and says so.
 - **Deploy VoyageCalc first, and check its proxy's body limit.** An old
   backend ignores the unknown `attachment` key: a caption-less file 422s (and
   says "not yet"), but a captioned one would be answered as if only the

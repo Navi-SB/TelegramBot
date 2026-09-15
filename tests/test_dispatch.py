@@ -536,6 +536,72 @@ async def test_a_proxy_refusing_the_upload_is_not_blamed_on_the_files_size(caplo
 
 
 @pytest.mark.asyncio
+async def test_files_sent_faster_than_the_platform_takes_them_are_told_to_wait(caplog):
+    """VoyageCalc takes 6 messages a minute per chat and answers the 7th with a
+    429. Selecting 7 or more files sends them together, so the rest got
+    "Something went wrong on my side. Try again, or /new." — but nothing broke
+    and /new does not help: waiting does."""
+    caplog.set_level(logging.INFO, logger="tropis.bot")
+
+    class BusyApi(FakeApi):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
+            raise PlatformError(429, "too_many_attempts", retry_after=42)
+
+    tg = await run(doc(), BusyApi(), FileTg())
+    assert tg.edits[0][1] == S.rate_limited("a minute", daily=False, file=True)
+    assert "that file wasn't read" in tg.edits[0][1] and "in a minute" in tg.edits[0][1]
+    assert S.UNEXPECTED not in tg.all_text
+    assert "turn_rate_limited" in logged(caplog)
+
+    tg = await run(msg("hello"), BusyApi())
+    assert tg.edits[0][1] == S.rate_limited("a minute", daily=False, file=False)
+    assert "that message wasn't processed" in tg.edits[0][1]
+
+
+@pytest.mark.asyncio
+async def test_the_daily_limit_says_when_to_send_again():
+    """The per-account daily ceiling is a 429 too, and its Retry-After can be
+    hours: "in a minute" would be untrue there."""
+    class SpentApi(FakeApi):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
+            raise PlatformError(429, "too_many_attempts", retry_after=3 * 3600 - 100)
+
+    tg = await run(msg("hello"), SpentApi())
+    assert tg.edits[0][1] == S.rate_limited("about 3 hours", daily=True, file=False)
+    assert "daily" in tg.edits[0][1]
+    assert S.UNEXPECTED not in tg.all_text
+
+
+@pytest.mark.parametrize("seconds, words", [
+    (None, "a minute"), (1, "a minute"), (61, "a minute"), (120, "a minute"),
+    (121, "about 3 minutes"), (40 * 60, "about 40 minutes"), (3600, "about 1 hour"),
+    (86401, "about 24 hours"),
+])
+def test_how_long_to_wait_is_said_in_words(seconds, words):
+    from bot.core.dispatch import _wait_words
+
+    assert _wait_words(seconds) == words
+
+
+@pytest.mark.asyncio
+async def test_the_platform_client_keeps_retry_after_from_a_429():
+    import httpx
+
+    from bot.platform.client import PlatformClient
+
+    def handler(request):
+        return httpx.Response(429, json={"detail": "too_many_attempts"}, headers={"Retry-After": "37"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        api = PlatformClient("http://platform.test", "tok", http)
+        with pytest.raises(PlatformError) as caught:
+            await api.turn("1", "hello", timeout=5)
+    assert caught.value.status == 429
+    assert caught.value.detail == "too_many_attempts"
+    assert caught.value.retry_after == 37
+
+
+@pytest.mark.asyncio
 async def test_a_chat_the_platform_no_longer_accepts_gets_the_pairing_message():
     """Unlinked or suspended after the link check: say what that check says,
     not "something went wrong"."""

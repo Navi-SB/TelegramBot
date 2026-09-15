@@ -15,10 +15,14 @@ CHANNEL = "telegram"  # default; WhatsApp passes channel="whatsapp"
 
 
 class PlatformError(RuntimeError):
-    def __init__(self, status: int, detail: Any = None):
+    def __init__(self, status: int, detail: Any = None, *, retry_after: Optional[int] = None):
         super().__init__(f"platform {status}")
         self.status = status
         self.detail = detail
+        # Seconds, from a 429's Retry-After: how long the user has to wait,
+        # which is a minute for the per-chat ceiling and can be hours for the
+        # daily one.
+        self.retry_after = retry_after
 
 
 class PlatformUnavailable(PlatformError):
@@ -47,7 +51,9 @@ class PlatformClient:
                 detail = r.json().get("detail")
             except Exception:
                 detail = r.text[:120]
-            raise PlatformError(r.status_code, detail)
+            wait = r.headers.get("retry-after", "").strip()
+            raise PlatformError(r.status_code, detail,
+                                retry_after=int(wait) if wait.isdigit() else None)
         return r.json() if r.content else {}
 
     # --- dedupe -------------------------------------------------------------
