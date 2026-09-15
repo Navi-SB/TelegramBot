@@ -201,7 +201,10 @@ async def test_help_needs_no_network():
 
 
 def test_help_says_how_to_switch_agents_by_name():
+    """Both ways: the assistant is told /agent <name> works here, and it is
+    the one the bridge reads itself, whatever the platform recognises."""
     assert "*switch to <name>*" in S.HELP
+    assert "*/agent <name>*" in S.HELP
 
 
 @pytest.mark.asyncio

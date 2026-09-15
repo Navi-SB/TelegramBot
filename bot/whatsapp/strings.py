@@ -30,7 +30,7 @@ HELP = (
     "*Tropis assistant*\n\n"
     "Just send a message to talk to your agent.\n\n"
     "*agents* — pick which of your agents to talk to\n"
-    "*switch to <name>* — go straight to an agent by name\n"
+    "*/agent <name>* or *switch to <name>* — go straight to an agent by name\n"
     "*short* — turn a pasted vessel description into a broker short description\n"
     "*new* — start a fresh conversation with the current agent\n"
     "*status* — what I'm connected to\n"
