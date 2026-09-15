@@ -536,6 +536,20 @@ async def test_a_proxy_refusing_the_upload_is_not_blamed_on_the_files_size(caplo
 
 
 @pytest.mark.asyncio
+async def test_a_chat_the_platform_no_longer_accepts_gets_the_pairing_message():
+    """Unlinked or suspended after the link check: say what that check says,
+    not "something went wrong"."""
+    class RefusingApi(FakeApi):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
+            raise PlatformError(403, "chat_not_linked")
+
+    for update, tg in ((doc(), FileTg()), (msg("hello"), FakeTg())):
+        tg = await run(update, RefusingApi(), tg)
+        assert S.NOT_LINKED in tg.edits[0][1]
+        assert S.UNEXPECTED not in tg.all_text
+
+
+@pytest.mark.asyncio
 async def test_a_file_the_platform_cannot_read_is_answered_like_any_reply():
     reason = "That's an old Word .doc — save it as .docx or PDF and send it again."
     api = FakeApi(turn={"reply": reason, "vessel_outputs": [], "pending": [],

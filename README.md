@@ -193,7 +193,10 @@ The rules, all in `bot/core/`:
   Telegram's cloud Bot API can't hand out files over 20 MB at all — that
   also reads as "too big".
 - **Linked chats only.** The file is fetched after the link check, so an
-  unlinked chat can never make the bot download anything.
+  unlinked chat can never make the bot download anything. VoyageCalc answers
+  that check as unlinked for a suspended account too, and if a chat is
+  refused (403) by the time its turn arrives, it gets the pairing message
+  rather than "something went wrong".
 - **Inside the turn deadline.** The download gets at most half of it (and
   never more than 60 s); whatever it uses comes off the backend call.
 - **Every failure has its own message**: too large, couldn't download

@@ -428,6 +428,10 @@ async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
             # (nginx's default is 1 MB), which only a deploy fixes.
             log("attachment_failed", chat_id=ctx.log_ref, outcome="upload_413")
             text = ch.S.FILE_NOT_DELIVERED
+        elif exc.status == 403:
+            # The chat was unlinked, or its account suspended, after the link
+            # check above. Say what the link check would have said.
+            text = ch.S.NOT_LINKED
         elif exc.status in (504, 0):
             text = ch.S.TURN_TIMEOUT
         else:
