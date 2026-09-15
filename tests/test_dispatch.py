@@ -634,6 +634,20 @@ async def test_a_caption_is_never_read_as_a_command():
 
 
 @pytest.mark.asyncio
+async def test_a_plain_words_switch_under_a_file_goes_with_the_file():
+    """"new conversation" or "switch to PMX" (NAV-80) are recognised by the
+    platform, and only in a message: under a file the bridge sends them as
+    the caption next to the file, the same as any other caption."""
+    for caption in ("new conversation", "list my agents", "switch to PMX Short"):
+        api = FakeApi()
+        await run(doc(caption), api, FileTg())
+        [(content, attachment)] = api.turns
+        assert content == caption
+        assert attachment["data_b64"] == base64.b64encode(PDF).decode()
+        assert "set_session" not in api.calls
+
+
+@pytest.mark.asyncio
 async def test_the_placeholder_says_the_file_is_being_read():
     tg = await run(doc(), FakeApi(), FileTg())
     assert tg.sent[0][1] == S.READING_FILE

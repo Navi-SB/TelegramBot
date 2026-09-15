@@ -157,7 +157,8 @@ a rewrite — and developing locally keeps it honest.
 Plain words work too, in every mode (an agent, Full text, `/short`, a ⚡
 workflow): "switch to PMX Short", "list my agents", "new conversation".
 VoyageCalc recognises those inside `/api/bot/turn` before any AI runs, so
-they are not billed as turns and the bridge needs no parser for them. When
+they are not billed as turns and the bridge needs no parser for them. A
+file's caption is never read that way either (see Files below). When
 a request doesn't settle on one agent, the turn result carries
 `"menu": "agents"` and the bridge opens the agent menu under the reply.
 
@@ -183,7 +184,8 @@ Every command in `/help` has to be registered in `scripts/set_webhook.py`
 Send a PDF (text or scanned) or a Word `.docx` — a Q88, a recap — with or
 without a caption. The caption is the instruction ("pmx format", "add these
 fixtures") and is never read as a command, so `/new` under a file is about
-the file.
+the file. Nor is it read as a plain-words ask: VoyageCalc answers "new
+conversation" or "switch to PMX" under a file by reading the file.
 
 The bridge **fetches and forwards; it never reads**. Only it holds the
 Telegram and WhatsApp tokens, so it downloads the file and posts it to
