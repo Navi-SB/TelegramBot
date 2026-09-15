@@ -299,6 +299,47 @@ async def test_outputs_rendered_before_a_late_error_still_ship():
     assert "APIError" in tg.sent[-1][1]  # the error follows as its own message
 
 
+@pytest.mark.asyncio
+async def test_a_turn_that_asks_for_the_agent_menu_shows_it_under_the_reply():
+    """'list my agents' in plain words: the platform answers and asks for the
+    tappable menu, so the user never has to learn /agents to use it."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}],
+                  turn={"reply": "Your agents: Freight Desk.", "vessel_outputs": [],
+                        "pending": [], "tools_used": [], "stop_reason": "agent_menu",
+                        "error": None, "menu": "agents"})
+    tg = await run(msg("list my agents"), api)
+    assert "Your agents: Freight Desk." in tg.edits[0][1]  # the reply first
+    assert tg.sent[-1][1] == S.PICK_AGENT                   # then the menu
+    buttons = [b["text"] for row in tg.keyboards[-1]["inline_keyboard"] for b in row]
+    assert "Freight Desk" in buttons
+    assert api.calls.index("turn") < api.calls.index("agents")
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_a_menu_request_shows_no_menu():
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    tg = await run(msg("how many panamaxes?"), api)
+    assert tg.keyboards == []
+    assert "agents" not in api.calls
+
+
+@pytest.mark.asyncio
+async def test_a_menu_that_fails_to_load_does_not_disown_the_delivered_reply():
+    """The reply already landed; 'your message wasn't processed' would be a
+    lie that invites a resend."""
+    class Api(FakeApi):
+        async def agents(self, chat_id):
+            raise PlatformUnavailable(0, "ReadTimeout")
+
+    api = Api(turn={"reply": "Your agents: Freight Desk.", "vessel_outputs": [],
+                    "pending": [], "tools_used": [], "stop_reason": "agent_menu",
+                    "error": None, "menu": "agents"})
+    tg = await run(msg("list my agents"), api)
+    assert "Your agents: Freight Desk." in tg.edits[0][1]
+    assert S.PLATFORM_DOWN not in tg.all_text
+    assert S.UNEXPECTED not in tg.all_text
+
+
 # ---------------------------------------------------------------------------
 # unlink
 # ---------------------------------------------------------------------------

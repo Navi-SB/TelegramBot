@@ -220,6 +220,28 @@ async def test_a_write_proposal_becomes_reply_buttons():
     assert encode("w", "y", "p1") in ids
 
 
+@pytest.mark.asyncio
+async def test_a_turn_that_asks_for_the_agent_menu_sends_the_list_after_the_reply():
+    """Same flow as Telegram through the channel abstraction: the reply goes
+    out as text, then the list message the user taps to switch."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}],
+                  turn=turn_result(reply="No agent called PMX here.",
+                                   stop_reason="agent_menu", menu="agents"))
+    wa = await run(text_msg("switch to PMX"), api)
+    assert "No agent called PMX here." in wa.texts[0][1]
+    (_, body, rows), = wa.lists
+    assert body == S.PICK_AGENT
+    assert "Freight Desk" in [r["title"] for r in rows]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_a_menu_request_sends_no_list():
+    api = FakeApi(turn=turn_result(reply="You have 12 Panamaxes."))
+    wa = await run(text_msg("how many panamaxes?"), api)
+    assert wa.lists == []
+    assert "agents" not in api.calls
+
+
 # ---------------------------------------------------------------------------
 # interactive replies drive the same codec paths
 # ---------------------------------------------------------------------------

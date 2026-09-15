@@ -397,6 +397,18 @@ async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
         except Exception as exc:  # noqa: BLE001 — one lost card ≠ a lost turn
             log_exception("confirm_card_send_failed", exc, chat_id=ctx.log_ref)
 
+    if result.get("menu") == "agents":
+        # The platform answered a plain-words "list my agents" or a switch it
+        # couldn't settle on one name, and wants the tappable menu under its
+        # reply. The reply has already landed, so a failed menu is logged
+        # rather than reported: PLATFORM_DOWN would claim the message wasn't
+        # processed when it was. A platform that predates the key never
+        # sends it, and nothing changes.
+        try:
+            await _show_agents(ctx, ch, api)
+        except Exception as exc:  # noqa: BLE001 — a lost menu ≠ a lost turn
+            log_exception("agent_menu_send_failed", exc, chat_id=ctx.log_ref)
+
     log("turn_done", chat_id=ctx.log_ref, tools=result.get("tools_used"),
         chunks=len(chunks), outcome=result.get("stop_reason"))
 
