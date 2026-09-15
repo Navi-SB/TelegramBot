@@ -185,6 +185,18 @@ async def test_pairing_and_status_name_a_company_login_by_company():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("word", ["new", "status"])
+async def test_new_and_status_say_the_chats_agent_was_deleted(word):
+    api = FakeApi(active_gone="agent", account="Acme Shipping (ops1)")
+    wa = await run(text_msg(word), api)
+    assert wa.texts[-1][1].startswith(
+        "⚠️ The agent this chat was using was deleted or isn't on *Acme Shipping (ops1)*, "
+        "so this chat now answers in plain text.\n"
+    )
+    assert api.selected is None
+
+
+@pytest.mark.asyncio
 async def test_no_agent_match_names_the_account_it_searched():
     api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}],
                   account="alex@personal.com")

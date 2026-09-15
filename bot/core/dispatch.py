@@ -200,8 +200,9 @@ async def _command(ctx, ch, api, link, *, turn_timeout: float) -> None:
     elif cmd == "agent":
         await _select_by_name(ctx, ch, api)
     elif cmd == "new":
-        session = await api.set_session(ctx.chat_id, await _active(api, ctx.chat_id), new_thread=True)
-        await ch.send(ctx.chat_id, ch.S.new_thread(session.get("preset_name")))
+        res = await api.agents(ctx.chat_id)
+        session = await api.set_session(ctx.chat_id, res.get("active_preset_id"), new_thread=True)
+        await ch.send(ctx.chat_id, _gone_note(ch, res) + ch.S.new_thread(session.get("preset_name")))
     elif cmd == "status":
         await _status(ctx, ch, api, link)
     elif cmd == "unlink":
@@ -212,18 +213,25 @@ async def _command(ctx, ch, api, link, *, turn_timeout: float) -> None:
         await ch.send(ctx.chat_id, ch.S.HELP)
 
 
-async def _active(api: PlatformClient, chat_id: str) -> Optional[str]:
-    return (await api.agents(chat_id)).get("active_preset_id")
-
-
 async def _status(ctx, ch, api, link) -> None:
     res = await api.agents(ctx.chat_id)
     session = await api.set_session(ctx.chat_id, res.get("active_preset_id"))
     user = link.get("user") or {}
-    await ch.send(ctx.chat_id, ch.S.status(
+    await ch.send(ctx.chat_id, _gone_note(ch, res) + ch.S.status(
         _account(user, link, res) or "unknown", session.get("preset_name"),
         session.get("turns", 0), agents_of=_agents_of(link, res),
     ))
+
+
+def _gone_note(ch: Channel, res: dict[str, Any]) -> str:
+    """`new` and `status` send the platform's active id back to /session, and
+    for an agent deleted in the web app (or a workflow switched off) there is
+    none, so the chat moves to plain text. The platform says when that is
+    what happened; the reply then says so first, or someone who believed they
+    were on their agent reads "plain text" with no reason. An older platform
+    sends no `active_gone`, and the reply goes without the note."""
+    kind = res.get("active_gone")
+    return ch.S.active_gone(kind, _agents_of(res)) if kind else ""
 
 
 def _account(user: dict[str, Any], *payloads: dict[str, Any]) -> Optional[str]:

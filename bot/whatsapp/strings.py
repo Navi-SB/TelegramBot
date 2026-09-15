@@ -120,6 +120,18 @@ def linked(name: str, account: str | None) -> str:
     )
 
 
+def active_gone(kind: str, agents_of: str | None = None) -> str:
+    """Said before new's or status's reply when the chat's agent, format or
+    workflow can no longer be used, and the chat has just moved to plain text."""
+    if kind == "workflow":
+        what = "The workflow this chat was using is switched off or was deleted"
+    else:
+        where = f"*{agents_of}*" if agents_of else "the account this chat is connected to"
+        noun = "format" if kind == "format" else "agent"
+        what = f"The {noun} this chat was using was deleted or isn't on {where}"
+    return f"⚠️ {what}, so this chat now answers in plain text.\n"
+
+
 def agent_selected(name: str, turns: int, rotated: bool) -> str:
     if rotated or turns == 0:
         head = f"● Now talking to *{name}* — starting a fresh conversation."

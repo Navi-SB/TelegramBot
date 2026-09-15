@@ -52,12 +52,14 @@ class FakeTg:
 
 class FakeApi:
     def __init__(self, *, linked=True, agents=None, turn=None, fail=None, account=None,
-                 user=None):
+                 user=None, active_gone=None):
         self._linked = linked
         # The platform's "whose agents are these" label; None is a platform
         # that predates it, which sends no key at all.
         self._account = account
         self._user = user or {"id": "u1", "name": "Alex", "email": "a@x.com"}
+        # "agent", "format" or "workflow" when the chat's choice is gone.
+        self._active_gone = active_gone
         self._agents = agents or []
         self._turn = turn or {"reply": "hello", "vessel_outputs": [], "pending": [],
                               "tools_used": [], "stop_reason": "end_turn", "error": None}
@@ -85,6 +87,8 @@ class FakeApi:
     async def agents(self, chat_id):
         self.calls.append("agents")
         res = {"agents": self._agents, "active_preset_id": None}
+        if self._active_gone:
+            res["active_gone"] = self._active_gone
         return {**res, "account": self._account} if self._account else res
 
     async def set_session(self, chat_id, preset_id=None, *, new_thread=False):
@@ -344,6 +348,36 @@ async def test_status_names_a_company_login_by_company_not_its_placeholder_email
 
     tg = await run(msg("/status"), FakeApi(user=SEAT))
     assert tg.sent[-1][1].startswith("<b>Account:</b> unknown\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["/new", "/status"])
+async def test_new_and_status_say_the_chats_agent_was_deleted(command):
+    """The live test: with the agent deleted in the web app, /new said "Fresh
+    conversation with plain text" and /status "plain text (no agent)", with no
+    reason, while an ordinary message explained. They moved the chat to plain
+    text all the same."""
+    api = FakeApi(active_gone="agent", account="Acme Shipping (ops1)")
+    tg = await run(msg(command), api)
+    text = tg.sent[-1][1]
+    assert text.startswith(
+        "⚠️ The agent this chat was using was deleted or isn't on "
+        "<b>Acme Shipping (ops1)</b>, so this chat now answers in plain text.\n"
+    )
+    assert ("Fresh conversation with plain text" if command == "/new"
+            else "plain text (no agent)") in text
+    assert api.selected is None
+
+    # A chat simply on plain text gets no note.
+    tg = await run(msg(command), FakeApi(account="Acme Shipping (ops1)"))
+    assert "⚠️" not in tg.sent[-1][1]
+
+
+def test_a_gone_workflow_or_format_is_named_as_one():
+    assert S.active_gone("workflow", "Acme").startswith(
+        "⚠️ The workflow this chat was using is switched off or was deleted, so")
+    assert S.active_gone("format").startswith(
+        "⚠️ The format this chat was using was deleted or isn't on the account this chat")
 
 
 @pytest.mark.asyncio
