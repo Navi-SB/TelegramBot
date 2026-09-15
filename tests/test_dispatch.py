@@ -551,7 +551,12 @@ async def test_files_sent_faster_than_the_platform_takes_them_are_told_to_wait(c
     assert tg.edits[0][1] == S.rate_limited("a minute", daily=False, file=True)
     assert "that file wasn't read" in tg.edits[0][1] and "in a minute" in tg.edits[0][1]
     assert S.UNEXPECTED not in tg.all_text
-    assert "turn_rate_limited" in logged(caplog)
+    [event] = [json.loads(r.getMessage()) for r in caplog.records
+               if json.loads(r.getMessage())["event"] == "turn_rate_limited"]
+    # The wait is what tells a chat bursting files from an account at its
+    # daily ceiling in the logs; the logger drops fields it does not know.
+    assert (event["retry_after"], event["kind"]) == (42, "file")
+    assert not any(k.endswith("__dropped") for k in event)
 
     tg = await run(msg("hello"), BusyApi())
     assert tg.edits[0][1] == S.rate_limited("a minute", daily=False, file=False)
@@ -559,9 +564,11 @@ async def test_files_sent_faster_than_the_platform_takes_them_are_told_to_wait(c
 
 
 @pytest.mark.asyncio
-async def test_the_daily_limit_says_when_to_send_again():
+async def test_the_daily_limit_says_when_to_send_again(caplog):
     """The per-account daily ceiling is a 429 too, and its Retry-After can be
     hours: "in a minute" would be untrue there."""
+    caplog.set_level(logging.INFO, logger="tropis.bot")
+
     class SpentApi(FakeApi):
         async def turn(self, chat_id, content, *, attachment=None, timeout):
             raise PlatformError(429, "too_many_attempts", retry_after=3 * 3600 - 100)
@@ -570,6 +577,8 @@ async def test_the_daily_limit_says_when_to_send_again():
     assert tg.edits[0][1] == S.rate_limited("about 3 hours", daily=True, file=False)
     assert "daily" in tg.edits[0][1]
     assert S.UNEXPECTED not in tg.all_text
+    events = [json.loads(r.getMessage()) for r in caplog.records]
+    assert next(e for e in events if e["event"] == "turn_rate_limited")["retry_after"] == 3 * 3600 - 100
 
 
 @pytest.mark.parametrize("seconds, words", [

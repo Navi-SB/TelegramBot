@@ -23,6 +23,9 @@ _ALLOWED = {
     "event", "env", "region", "commit", "update_id", "chat_id", "user_id",
     "kind", "command", "claim_status", "tools", "iterations", "chunks",
     "duration_ms", "outcome", "error_class", "status", "route", "mime",
+    # A 429's wait in seconds: it is what tells a chat sending files faster
+    # than 6 a minute from an account at its daily ceiling.
+    "retry_after",
 }
 
 _logger = logging.getLogger("tropis.bot")
