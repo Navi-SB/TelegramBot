@@ -9,10 +9,16 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from .. import strings as S
+from ..core.attachments import Attachment, AttachmentTooLarge, AttachmentUnavailable
 from ..core.dispatch import Inbound, Progress, diff_lines
 from .api import TelegramError
 from .html import esc, md_to_html, split_html
 from .keyboards import agent_picker, confirm_unlink, confirm_write
+
+
+# Checked in this order, and before "document": Telegram sets `document` on a
+# GIF too (animation, kept for old clients), and a GIF is not a file to read.
+_MEDIA_KEYS = ("animation", "photo", "voice", "video_note", "sticker", "video", "audio")
 
 
 def parse_update(u: dict[str, Any]) -> Optional[Inbound]:
@@ -35,7 +41,24 @@ def parse_update(u: dict[str, Any]) -> Optional[Inbound]:
     status = (member.get("new_chat_member") or {}).get("status")
 
     m = u.get("message") or {}
-    media = any(k in m for k in ("photo", "voice", "document", "sticker", "video", "audio"))
+    media_kind = next((k for k in _MEDIA_KEYS if k in m), None)
+    media = m.get(media_kind) if media_kind else None
+    media_mime = media.get("mime_type") if isinstance(media, dict) else None  # photo is a list
+
+    attachment = None
+    doc = m.get("document")
+    if not cb and media_kind is None and isinstance(doc, dict) and doc.get("file_id"):
+        # A document's words are in `caption`, not `text`. The caption is
+        # what the user wants done with the file — never a command: "/new"
+        # written under a PDF is an instruction about the PDF.
+        attachment = Attachment(
+            ref=str(doc["file_id"]),
+            file_name=doc.get("file_name"),
+            mime_hint=doc.get("mime_type"),
+            size_hint=doc.get("file_size") if isinstance(doc.get("file_size"), int) else None,
+        )
+        text = m.get("caption")
+        command = args = None
 
     return Inbound(
         event_id=str(u["update_id"]),
@@ -47,9 +70,12 @@ def parse_update(u: dict[str, Any]) -> Optional[Inbound]:
         args=args or "",
         callback_data=cb.get("data") if cb else None,
         callback_id=cb.get("id") if cb else None,
-        is_unsupported_media=media and not text,
+        is_unsupported_media=media_kind is not None and not text,
         is_private=chat.get("type", "private") == "private",
         blocked=status in ("kicked", "left"),
+        attachment=attachment,
+        media_kind=media_kind,
+        media_mime=media_mime,
     )
 
 
@@ -105,8 +131,31 @@ class TelegramChannel:
 
     async def begin_progress(self, ctx: Inbound) -> TelegramProgress:
         await self._tg.send_chat_action(ctx.chat_id)
-        placeholder = await self._tg.send_safe(ctx.chat_id, S.THINKING)
+        # A file turn spends its first seconds downloading; say what's
+        # happening. The placeholder becomes the answer either way.
+        waiting = S.READING_FILE if ctx.attachment is not None else S.THINKING
+        placeholder = await self._tg.send_safe(ctx.chat_id, waiting)
         return TelegramProgress(self._tg, ctx.chat_id, placeholder)
+
+    async def fetch_attachment(self, att: Attachment, max_bytes: int) -> bytes:
+        try:
+            info = await self._tg.get_file(att.ref)
+        except TelegramError as exc:
+            # Over the cloud Bot API's 20 MB, Telegram won't even hand out a
+            # path — which is still "too big" to the user, not "try again".
+            if "too big" in exc.description.lower():
+                raise AttachmentTooLarge("platform_too_large") from None
+            raise AttachmentUnavailable(f"getfile_{exc.code}") from None
+        except Exception as exc:  # noqa: BLE001 — transport; its message may hold the URL
+            raise AttachmentUnavailable(type(exc).__name__) from None
+
+        size = info.get("file_size")
+        if isinstance(size, int) and size > max_bytes:
+            raise AttachmentTooLarge()
+        path = info.get("file_path")
+        if not path:
+            raise AttachmentUnavailable("no_file_path")
+        return await self._tg.download_file(path, max_bytes)
 
     def format_markdown(self, md: str) -> list[str]:
         return split_html(md_to_html(md))

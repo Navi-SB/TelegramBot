@@ -2,17 +2,26 @@
 WhatsApp channel adapter, with a fake Cloud API client and the same fake
 platform the Telegram tests use. The behavioural invariants (reveal-nothing
 gate, outputs-before-error, 409 semantics) must hold identically here."""
+import base64
+import hashlib
+import json
+import logging
+
+import httpx
 import pytest
 
 from bot.core.codec import encode, ref
 from bot.core.dispatch import handle_inbound
 from bot.platform.client import PlatformError, PlatformUnavailable
 from bot.whatsapp import strings as S
-from bot.whatsapp.api import WhatsAppError, WhatsAppUndeliverable, WhatsAppWindowClosed
+from bot.core.attachments import MAX_BYTES
+from bot.whatsapp.api import (
+    WhatsAppClient, WhatsAppError, WhatsAppUndeliverable, WhatsAppWindowClosed,
+)
 from bot.whatsapp.channel import WhatsAppChannel
 from bot.whatsapp.parse import parse_envelopes
 from tests.test_dispatch import SEAT, FakeApi
-from tests.test_wa_parse import NUM, text_msg, wa_body
+from tests.test_wa_parse import NUM, doc_msg, text_msg, wa_body
 
 
 class FakeWa:
@@ -260,10 +269,18 @@ async def test_every_confirmation_names_the_bare_word_that_opens_the_menu():
 
 
 @pytest.mark.asyncio
-async def test_media_gets_a_useful_refusal():
-    msg = {"from": NUM, "id": "wamid.M1", "type": "image", "image": {"id": "m1"}}
-    wa = await run(msg, FakeApi())
+async def test_media_gets_a_useful_refusal(caplog):
+    caplog.set_level(logging.INFO, logger="tropis.bot")
+    msg = {"from": NUM, "id": "wamid.M1", "type": "image",
+           "image": {"id": "m1", "mime_type": "image/jpeg", "caption": "MV SECRET"}}
+    api = FakeApi()
+    wa = await run(msg, api)
     assert S.TEXT_ONLY in wa.all_text
+    assert api.calls == []
+    [event] = [json.loads(r.getMessage()) for r in caplog.records]
+    assert (event["event"], event["kind"], event["mime"]) == ("media_refused", "image", "image/jpeg")
+    assert event["chat_id"] != NUM  # the keyed log ref, never the phone number
+    assert "SECRET" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -498,3 +515,193 @@ async def test_a_short_description_turn_arrives_verbatim_and_unfenced():
     api = FakeApi(turn=turn_result(vessel_outputs=[rendered]))
     wa = await run(text_msg("Supramax 63k built 2024 ..."), api)
     assert wa.texts[0][1] == rendered
+
+
+# ---------------------------------------------------------------------------
+# files (NAV-81) — media id → fresh URL → Bearer download → the platform
+# ---------------------------------------------------------------------------
+DOCX = b"PK\x03\x04" + b"word/document.xml" * 64
+MEDIA_URL = "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=1234567890"
+
+
+class FileWa(FakeWa):
+    """FakeWa that can serve one media file."""
+
+    def __init__(self, data=DOCX, *, file_size=None, sha256="hex",
+                 media_error=None):
+        super().__init__()
+        self._data = data
+        self._file_size = str(len(data)) if file_size is None else file_size
+        if sha256 == "hex":
+            sha256 = hashlib.sha256(data).hexdigest()
+        self._sha256 = sha256
+        self._media_error = media_error
+        self.media_calls: list[str] = []
+        self.downloads: list[str] = []
+
+    async def get_media(self, media_id):
+        self.media_calls.append(media_id)
+        if self._media_error:
+            raise self._media_error
+        return {"url": f"{MEDIA_URL}&n={len(self.media_calls)}", "id": media_id,
+                "mime_type": "application/pdf", "file_size": self._file_size,
+                "sha256": self._sha256}
+
+    async def download_media(self, url, max_bytes):
+        self.downloads.append(url)
+        return self._data
+
+
+def wa_doc(caption=None, **over):
+    return doc_msg(caption, sha256=hashlib.sha256(DOCX).hexdigest(), **over)
+
+
+@pytest.mark.asyncio
+async def test_a_document_reaches_the_platform_with_its_caption_and_bytes():
+    api = FakeApi(turn=turn_result(reply="MV OCEAN STAR 82k dwt"))
+    wa = FileWa()
+    await run(wa_doc("pmx format please"), api, wa)
+    [(content, attachment)] = api.turns
+    assert content == "pmx format please"
+    assert attachment == {"filename": "Recap MV OCEAN STAR.docx",
+                          "mime_type": "application/vnd.openxmlformats-officedocument"
+                                       ".wordprocessingml.document",
+                          "data_b64": base64.b64encode(DOCX).decode()}
+    assert "MV OCEAN STAR 82k dwt" in wa.texts[0][1]
+    assert "Reading" not in wa.all_text  # no notice that would sit in the thread
+
+
+@pytest.mark.asyncio
+async def test_a_caption_less_document_sends_an_empty_instruction():
+    api = FakeApi()
+    await run(wa_doc(), api, FileWa())
+    assert api.turns[0][0] == ""
+
+
+@pytest.mark.asyncio
+async def test_a_caption_that_looks_like_a_command_goes_to_the_agent():
+    api = FakeApi()
+    await run(wa_doc("new"), api, FileWa())
+    assert api.turns[0][0] == "new"
+    assert "set_session" not in api.calls
+
+
+@pytest.mark.asyncio
+async def test_every_download_asks_meta_for_a_fresh_url():
+    """Meta's URL dies after five minutes, and a batch of turns can outlast
+    that — so the URL is never carried from the webhook or reused."""
+    api, wa = FakeApi(), FileWa()
+    await run(wa_doc(mid="wamid.D1"), api, wa)
+    await run(wa_doc(mid="wamid.D2"), api, wa)
+    assert wa.media_calls == ["1234567890", "1234567890"]
+    assert wa.downloads[0] != wa.downloads[1]
+
+
+@pytest.mark.asyncio
+async def test_an_unlinked_chat_never_asks_meta_for_the_file():
+    api, wa = FakeApi(linked=False), FileWa()
+    await run(wa_doc("describe"), api, wa)
+    assert S.NOT_LINKED in wa.all_text
+    assert wa.media_calls == [] and wa.downloads == []
+
+
+@pytest.mark.asyncio
+async def test_meta_reporting_an_oversize_file_skips_the_download():
+    api, wa = FakeApi(), FileWa(file_size=str(MAX_BYTES + 1))
+    await run(wa_doc(), api, wa)
+    assert S.FILE_TOO_LARGE in wa.all_text
+    assert wa.downloads == [] and "turn" not in api.calls
+
+
+@pytest.mark.asyncio
+async def test_a_hash_mismatch_is_unavailable_and_never_reaches_the_platform():
+    for wa, message in (
+        (FileWa(sha256="0" * 64), wa_doc()),                      # Graph's hash
+        (FileWa(sha256=None), doc_msg(None, sha256="f" * 64)),    # the webhook's
+    ):
+        api = FakeApi()
+        await run(message, api, wa)
+        assert S.FILE_UNAVAILABLE in wa.all_text
+        assert "turn" not in api.calls
+
+
+@pytest.mark.asyncio
+async def test_a_matching_hash_is_accepted_as_hex_or_base64():
+    b64 = base64.b64encode(hashlib.sha256(DOCX).digest()).decode()
+    for wa, message in ((FileWa(), wa_doc()),
+                        (FileWa(sha256=b64), doc_msg(None, sha256=b64))):
+        api = FakeApi()
+        await run(message, api, wa)
+        assert api.turns, "a matching hash must not block the file"
+
+
+@pytest.mark.asyncio
+async def test_a_graph_failure_says_the_file_was_not_processed():
+    api, wa = FakeApi(), FileWa(media_error=WhatsAppError(100, 33, "Unsupported get request"))
+    await run(wa_doc(), api, wa)
+    assert S.FILE_UNAVAILABLE in wa.all_text
+    assert "turn" not in api.calls
+
+
+@pytest.mark.asyncio
+async def test_an_old_platform_says_files_are_not_supported_yet():
+    class OldApi(FakeApi):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
+            raise PlatformError(422, [{"type": "string_too_short", "loc": ["body", "content"]}])
+
+    wa = FileWa()
+    await run(wa_doc(), OldApi(), wa)
+    assert S.FILES_NOT_SUPPORTED_YET in wa.all_text
+
+
+@pytest.mark.asyncio
+async def test_a_proxy_refusing_the_upload_says_the_file_was_not_passed_on():
+    class ProxiedApi(FakeApi):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
+            raise PlatformError(413, "Request Entity Too Large")
+
+    wa = FileWa()
+    await run(wa_doc(), ProxiedApi(), wa)
+    assert S.FILE_NOT_DELIVERED in wa.all_text
+    assert S.FILE_TOO_LARGE not in wa.all_text
+
+
+@pytest.mark.asyncio
+async def test_the_access_token_never_reaches_errors_or_logs(caplog):
+    """End to end over a real client: the download blows up with a transport
+    error that names the URL and the auth header, the way a careless proxy
+    or library message might. None of it may surface."""
+    caplog.set_level(logging.DEBUG)
+    token = "EAAG-wa-SECRET-access-token"
+
+    def handler(req):
+        if req.url.host == "graph.facebook.com" and req.method == "GET":
+            return httpx.Response(200, json={"url": MEDIA_URL, "file_size": "10"})
+        if req.url.host == "lookaside.fbsbx.com":
+            raise httpx.ReadError(f"reset by peer: {req.url} {req.headers['authorization']}",
+                                  request=req)
+        return httpx.Response(200, json={"messages": [{"id": "wamid.out"}]})
+
+    sent = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        wa = WhatsAppClient(token, "12345", http)
+        real_send = wa.send_text
+
+        async def send_text(to, body):
+            sent.append(body)
+            return await real_send(to, body)
+
+        wa.send_text = send_text
+        api = FakeApi()
+        await run(wa_doc(), api, wa)
+
+    assert S.FILE_UNAVAILABLE in sent
+    logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert token not in logs and "lookaside" not in logs
+    assert "ReadError" in logs  # the class, for whoever is debugging
+
+
+def test_whatsapp_file_strings_state_the_cap_and_how_to_send():
+    assert f"{MAX_BYTES // (1024 * 1024)} MB" in S.FILE_TOO_LARGE
+    assert "PDF or Word file" in S.HELP and "caption" in S.HELP
+    assert "PDF" in S.TEXT_ONLY and ".docx" in S.TEXT_ONLY
