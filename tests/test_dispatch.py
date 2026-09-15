@@ -51,8 +51,11 @@ class FakeTg:
 
 
 class FakeApi:
-    def __init__(self, *, linked=True, agents=None, turn=None, fail=None):
+    def __init__(self, *, linked=True, agents=None, turn=None, fail=None, account=None):
         self._linked = linked
+        # The platform's "whose agents are these" label; None is a platform
+        # that predates it, which sends no key at all.
+        self._account = account
         self._agents = agents or []
         self._turn = turn or {"reply": "hello", "vessel_outputs": [], "pending": [],
                               "tools_used": [], "stop_reason": "end_turn", "error": None}
@@ -65,8 +68,10 @@ class FakeApi:
         self.calls.append("get_link")
         if self._fail == "down":
             raise PlatformUnavailable(0, "ConnectError")
-        return {"linked": self._linked,
-                "user": {"id": "u1", "name": "Alex", "email": "a@x.com"}} if self._linked else {"linked": False}
+        if not self._linked:
+            return {"linked": False}
+        link = {"linked": True, "user": {"id": "u1", "name": "Alex", "email": "a@x.com"}}
+        return {**link, "account": self._account} if self._account else link
 
     async def redeem(self, chat_id, code, tg_user_id, name):
         self.calls.append("redeem")
@@ -76,7 +81,8 @@ class FakeApi:
 
     async def agents(self, chat_id):
         self.calls.append("agents")
-        return {"agents": self._agents, "active_preset_id": None}
+        res = {"agents": self._agents, "active_preset_id": None}
+        return {**res, "account": self._account} if self._account else res
 
     async def set_session(self, chat_id, preset_id=None, *, new_thread=False):
         self.calls.append("set_session")
@@ -253,6 +259,62 @@ async def test_every_confirmation_says_how_to_switch_later():
 
     tg = await run(cb(encode("a", "-")), api)
     assert S.SWITCH_HINT in tg.sent[-1][1]              # Full text is a choice too
+
+
+@pytest.mark.asyncio
+async def test_the_agent_menu_says_whose_agents_it_is_showing():
+    """A chat linked to a personal account can't offer an agent that lives in
+    the company's shared agents. Naming the account makes that visible."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}],
+                  account="Acme <Shipping> & Co")
+    tg = await run(msg("/agents"), api)
+    assert tg.sent[-1][1] == S.pick_agent("Acme <Shipping> & Co")
+    assert "Showing the agents for Acme &lt;Shipping&gt; &amp; Co." in tg.sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_the_agent_menu_goes_without_an_account_a_platform_doesnt_send():
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}])
+    tg = await run(msg("/agents"), api)
+    assert tg.sent[-1][1] == S.PICK_AGENT
+
+
+@pytest.mark.asyncio
+async def test_status_names_whose_agents_the_chat_uses():
+    tg = await run(msg("/status"), FakeApi(account="Acme Shipping"))
+    assert "<b>Agents from:</b> Acme Shipping" in tg.sent[-1][1]
+    assert "<b>Account:</b> a@x.com" in tg.sent[-1][1]
+
+    tg = await run(msg("/status"), FakeApi())
+    assert "Agents from" not in tg.sent[-1][1]
+    assert "<b>Account:</b> a@x.com" in tg.sent[-1][1]
+
+    # A personal account labelled by its email would only say it twice.
+    tg = await run(msg("/status"), FakeApi(account="a@x.com"))
+    assert "Agents from" not in tg.sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_status_takes_the_account_from_the_agent_list_when_the_link_has_none():
+    class Api(FakeApi):
+        async def get_link(self, chat_id):
+            link = await super().get_link(chat_id)
+            return {k: v for k, v in link.items() if k != "account"}
+
+    tg = await run(msg("/status"), Api(account="Acme Shipping"))
+    assert "<b>Agents from:</b> Acme Shipping" in tg.sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_no_agent_match_names_the_account_it_searched():
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}],
+                  account="alex@personal.com")
+    tg = await run(msg("/agent PMX Short"), api)
+    assert tg.sent[-1][1] == (
+        "No agent matches <b>PMX Short</b> in the agents for "
+        "<b>alex@personal.com</b>. Try /agents."
+    )
+    assert api.selected is None
 
 
 @pytest.mark.asyncio

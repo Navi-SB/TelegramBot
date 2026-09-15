@@ -133,10 +133,21 @@ def new_thread(name: str | None) -> str:
     )
 
 
-def status(account: str, agent: str | None, turns: int) -> str:
+def pick_agent(agents_of: str | None = None) -> str:
+    """The agent menu's header, naming whose agents these are when the
+    platform says (the Telegram module says why)."""
+    if not agents_of:
+        return PICK_AGENT
+    return f"{PICK_AGENT}\n_Showing the agents for {agents_of}._"
+
+
+def status(account: str, agent: str | None, turns: int, agents_of: str | None = None) -> str:
+    # Left out when it would only repeat the email on the line above.
+    scope = f"*Agents from:* {agents_of}\n" if agents_of and agents_of != account else ""
     return (
         f"*Account:* {account}\n"
-        f"*Agent:* {agent or 'plain text (no agent)'}\n"
+        + scope
+        + f"*Agent:* {agent or 'plain text (no agent)'}\n"
         f"*Conversation:* {turns} message(s)"
     )
 
@@ -154,8 +165,9 @@ def tool_selected(name: str) -> str:
     )
 
 
-def no_agent_match(query: str) -> str:
-    return f"No agent matches *{query}*. Send *agents* to see the list."
+def no_agent_match(query: str, agents_of: str | None = None) -> str:
+    where = f" in the agents for *{agents_of}*" if agents_of else ""
+    return f"No agent matches *{query}*{where}. Send *agents* to see the list."
 
 
 def confirm_failed(detail: str) -> str:

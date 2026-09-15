@@ -149,6 +149,43 @@ async def test_a_bare_agents_word_opens_the_list_picker():
 
 
 @pytest.mark.asyncio
+async def test_the_agent_list_says_whose_agents_it_is_showing():
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}],
+                  account="Acme Shipping")
+    wa = await run(text_msg("agents"), api)
+    (_, body, _), = wa.lists
+    assert body == "Which agent should I use?\n_Showing the agents for Acme Shipping._"
+
+    wa = await run(text_msg("agents"), FakeApi(agents=api._agents))
+    (_, body, _), = wa.lists
+    assert body == S.PICK_AGENT
+
+
+@pytest.mark.asyncio
+async def test_status_names_whose_agents_the_chat_uses():
+    wa = await run(text_msg("status"), FakeApi(account="Acme Shipping"))
+    assert "*Agents from:* Acme Shipping" in wa.texts[-1][1]
+
+    wa = await run(text_msg("status"), FakeApi())
+    assert "Agents from" not in wa.texts[-1][1]
+    assert "*Account:* a@x.com" in wa.texts[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_no_agent_match_names_the_account_it_searched():
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}],
+                  account="alex@personal.com")
+    wa = await run(text_msg("/agent PMX Short"), api)
+    assert wa.texts[-1][1] == (
+        "No agent matches *PMX Short* in the agents for *alex@personal.com*. "
+        "Send *agents* to see the list."
+    )
+
+    wa = await run(text_msg("/agent PMX Short"), FakeApi(agents=api._agents))
+    assert wa.texts[-1][1] == "No agent matches *PMX Short*. Send *agents* to see the list."
+
+
+@pytest.mark.asyncio
 async def test_multi_word_messages_go_to_the_agent_not_the_command_router():
     api = FakeApi()
     await run(text_msg("new fixture for MV OCEAN STAR"), api)

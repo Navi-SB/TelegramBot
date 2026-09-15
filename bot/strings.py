@@ -140,10 +140,29 @@ def new_thread(name: str | None) -> str:
     )
 
 
-def status(account: str, agent: str | None, turns: int) -> str:
+def pick_agent(agents_of: str | None = None) -> str:
+    """The agent menu's header, naming whose agents these are when the
+    platform says. Said up front, a menu missing the agent you want (because
+    it lives under the other account) explains itself."""
+    if not agents_of:
+        return PICK_AGENT
+    import html as _h
+
+    return f"{PICK_AGENT}\n<i>Showing the agents for {_h.escape(agents_of, quote=False)}.</i>"
+
+
+def status(account: str, agent: str | None, turns: int, agents_of: str | None = None) -> str:
+    import html as _h
+
+    # Left out when it would only repeat the email on the line above.
+    scope = (
+        f"<b>Agents from:</b> {_h.escape(agents_of, quote=False)}\n"
+        if agents_of and agents_of != account else ""
+    )
     return (
         f"<b>Account:</b> {account}\n"
-        f"<b>Agent:</b> {agent or 'plain text (no agent)'}\n"
+        + scope
+        + f"<b>Agent:</b> {agent or 'plain text (no agent)'}\n"
         f"<b>Conversation:</b> {turns} message(s)"
     )
 
@@ -161,10 +180,18 @@ def tool_selected(name: str) -> str:
     )
 
 
-def no_agent_match(query: str) -> str:
+def no_agent_match(query: str, agents_of: str | None = None) -> str:
     import html as _h
 
-    return f"No agent matches <b>{_h.escape(query, quote=False)}</b>. Try /agents."
+    q = _h.escape(query, quote=False)
+    if not agents_of:
+        return f"No agent matches <b>{q}</b>. Try /agents."
+    # Naming whose agents were searched is what makes "I'm linked to the wrong
+    # account" visible from the chat. Only a linked chat ever gets here.
+    return (
+        f"No agent matches <b>{q}</b> in the agents for "
+        f"<b>{_h.escape(agents_of, quote=False)}</b>. Try /agents."
+    )
 
 
 def confirm_failed(detail: str) -> str:
