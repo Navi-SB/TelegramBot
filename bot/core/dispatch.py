@@ -13,12 +13,44 @@ across the extraction.
 """
 from __future__ import annotations
 
+import asyncio
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
 from ..logging import log, log_exception
 from ..platform.client import PlatformClient, PlatformError, PlatformUnavailable
+from .attachments import (
+    MAX_BYTES, Attachment, AttachmentError, AttachmentTooLarge, to_payload,
+)
 from .codec import decode, ref
+
+# A download gets at most this share of the turn deadline, and never more than
+# this many seconds: whatever it uses comes off the time the agent gets, and a
+# file that takes a minute to arrive is not going to arrive.
+_FETCH_SHARE = 0.5
+_FETCH_MAX_SECONDS = 60.0
+
+# The longest Retry-After the per-minute ceiling gives (its window plus a
+# second, with room). Anything longer is the daily one. The daily one can
+# also free a slot within a minute, and then reads as the per-minute one:
+# sending it again in a minute is still right.
+_BURST_WAIT_MAX = 120
+
+
+def _wait_words(seconds: Optional[int]) -> str:
+    """How long a 429 says to wait, as the user reads it. No Retry-After is
+    read as the per-minute ceiling, by far the one a chat meets."""
+    if seconds is None or seconds <= _BURST_WAIT_MAX:
+        return "a minute"
+    if seconds < 3600:
+        return f"about {-(-seconds // 60)} minutes"
+    hours = max(1, round(seconds / 3600))
+    return f"about {hours} hour{'s' if hours != 1 else ''}"
+
+
+_MIME_SHAPE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")
 
 
 @dataclass
@@ -38,6 +70,13 @@ class Inbound:
     is_private: bool = True
     blocked: bool = False         # Telegram-only; WhatsApp learns it send-side
     log_ref: str = ""             # what logs show for this chat; never a phone number
+    # A PDF or Word file (or anything sent AS a file — the backend decides).
+    # Its caption, if any, is `text`, and is never read as a command.
+    attachment: Optional[Attachment] = None
+    # What an unsupported message was ("photo", "sticker") and its declared
+    # type, for the media_refused log line only.
+    media_kind: Optional[str] = None
+    media_mime: Optional[str] = None
 
     def __post_init__(self):
         if not self.log_ref:
@@ -107,6 +146,10 @@ class Channel(Protocol):
     async def send_unlink_confirm(self, chat_id: str) -> None: ...
     async def send_confirm_write(self, chat_id: str, pending: dict[str, Any]) -> None: ...
     async def begin_progress(self, ctx: "Inbound") -> Progress: ...
+    async def fetch_attachment(self, att: Attachment, max_bytes: int) -> bytes:
+        """The file's bytes, or AttachmentTooLarge / AttachmentUnavailable.
+        Nothing else may escape: the core turns those two into messages."""
+        ...
     def format_markdown(self, md: str) -> list[str]: ...
     def format_verbatim(self, text: str) -> list[str]: ...
 
@@ -132,6 +175,10 @@ async def handle_inbound(
         await ch.send(ctx.chat_id, S.HELP)
         return
     if ctx.is_unsupported_media:
+        # The kind and declared type only — never a file name or caption.
+        # This is how demand for photos and voice notes gets measured.
+        log("media_refused", chat_id=ctx.log_ref, kind=ctx.media_kind,
+            mime=_loggable_mime(ctx.media_mime))
         await ch.send(ctx.chat_id, S.TEXT_ONLY)
         return
 
@@ -154,6 +201,10 @@ async def handle_inbound(
                 await ch.send(ctx.chat_id, S.NOT_LINKED)
         elif ctx.callback_data:
             await _callback(ctx, ch, api)
+        elif ctx.attachment is not None:
+            # Only here, past the link check: an unlinked chat must never be
+            # able to make the bot download anything.
+            await _turn(ctx, ch, api, turn_timeout=turn_timeout)
         elif ctx.command:
             await _command(ctx, ch, api, link, turn_timeout=turn_timeout)
         elif ctx.text:
@@ -183,7 +234,7 @@ async def _redeem(ctx: Inbound, ch: Channel, api: PlatformClient) -> None:
         return
     user = res.get("user") or {}
     log("linked", chat_id=ctx.log_ref, user_id=user.get("id"))
-    await ch.send(ctx.chat_id, ch.S.linked(user.get("name", "your account"), user.get("email", "")))
+    await ch.send(ctx.chat_id, ch.S.linked(user.get("name") or "your account", _account(user, res)))
     await _show_agents(ctx, ch, api)
 
 
@@ -200,8 +251,9 @@ async def _command(ctx, ch, api, link, *, turn_timeout: float) -> None:
     elif cmd == "agent":
         await _select_by_name(ctx, ch, api)
     elif cmd == "new":
-        session = await api.set_session(ctx.chat_id, await _active(api, ctx.chat_id), new_thread=True)
-        await ch.send(ctx.chat_id, ch.S.new_thread(session.get("preset_name")))
+        res = await api.agents(ctx.chat_id)
+        session = await api.set_session(ctx.chat_id, res.get("active_preset_id"), new_thread=True)
+        await ch.send(ctx.chat_id, _gone_note(ch, res) + ch.S.new_thread(session.get("preset_name")))
     elif cmd == "status":
         await _status(ctx, ch, api, link)
     elif cmd == "unlink":
@@ -212,24 +264,56 @@ async def _command(ctx, ch, api, link, *, turn_timeout: float) -> None:
         await ch.send(ctx.chat_id, ch.S.HELP)
 
 
-async def _active(api: PlatformClient, chat_id: str) -> Optional[str]:
-    return (await api.agents(chat_id)).get("active_preset_id")
-
-
 async def _status(ctx, ch, api, link) -> None:
-    session = await api.set_session(ctx.chat_id, await _active(api, ctx.chat_id))
+    res = await api.agents(ctx.chat_id)
+    session = await api.set_session(ctx.chat_id, res.get("active_preset_id"))
     user = link.get("user") or {}
-    await ch.send(ctx.chat_id, ch.S.status(
-        user.get("email", "unknown"), session.get("preset_name"), session.get("turns", 0)
+    await ch.send(ctx.chat_id, _gone_note(ch, res) + ch.S.status(
+        _account(user, link, res) or "unknown", session.get("preset_name"),
+        session.get("turns", 0), agents_of=_agents_of(link, res),
     ))
 
 
+def _gone_note(ch: Channel, res: dict[str, Any]) -> str:
+    """`new` and `status` send the platform's active id back to /session, and
+    for an agent deleted in the web app (or a workflow switched off) there is
+    none, so the chat moves to plain text. The platform says when that is
+    what happened; the reply then says so first, or someone who believed they
+    were on their agent reads "plain text" with no reason. An older platform
+    sends no `active_gone`, and the reply goes without the note."""
+    kind = res.get("active_gone")
+    return ch.S.active_gone(kind, _agents_of(res)) if kind else ""
+
+
+def _account(user: dict[str, Any], *payloads: dict[str, Any]) -> Optional[str]:
+    """What to call the account a chat is connected to: its email, or the
+    platform's label when the email is a placeholder. A company login keeps a
+    made-up address under the reserved .invalid domain (RFC 2606) that nobody
+    has ever seen, and "ops1@seat.invalid" in "Connected to" or on the status
+    Account line means nothing to its owner; the label says "Acme Shipping
+    (ops1)". None when there is neither."""
+    email = (user.get("email") or "").strip()
+    if email and not email.lower().endswith(".invalid"):
+        return email
+    return _agents_of(*payloads)
+
+
+def _agents_of(*payloads: dict[str, Any]) -> Optional[str]:
+    """The platform's label for whose agents this chat sees — the company's
+    shared ones for a seat, the person's own otherwise. A chat linked to the
+    wrong one of the two can't offer the agent the user is looking for, and
+    nothing else in the chat says which it is. Older platforms send no label
+    and the text simply goes without it."""
+    return next((p["account"] for p in payloads if p.get("account")), None)
+
+
 async def _show_agents(ctx, ch, api, page: int = 0) -> None:
-    agents = (await api.agents(ctx.chat_id)).get("agents", [])
+    res = await api.agents(ctx.chat_id)
+    agents = res.get("agents", [])
     if not agents:
         await ch.send(ctx.chat_id, ch.S.NO_AGENTS)
         return
-    await ch.send_agent_picker(ctx.chat_id, agents, page, ch.S.PICK_AGENT)
+    await ch.send_agent_picker(ctx.chat_id, agents, page, ch.S.pick_agent(_agents_of(res)))
 
 
 async def _show_tools(ctx, ch, api) -> None:
@@ -257,7 +341,8 @@ async def _show_tools(ctx, ch, api) -> None:
 
 async def _select_by_name(ctx, ch, api) -> None:
     wanted = ctx.args.strip().lower()
-    agents = (await api.agents(ctx.chat_id)).get("agents", [])
+    res = await api.agents(ctx.chat_id)
+    agents = res.get("agents", [])
     if not wanted:
         await _show_agents(ctx, ch, api)
         return
@@ -269,7 +354,7 @@ async def _select_by_name(ctx, ch, api) -> None:
     elif hits:
         await ch.send_agent_picker(ctx.chat_id, hits, 0, ch.S.PICK_WHICH)
     else:
-        await ch.send(ctx.chat_id, ch.S.no_agent_match(ctx.args[:40]))
+        await ch.send(ctx.chat_id, ch.S.no_agent_match(ctx.args[:40], _agents_of(res)))
 
 
 async def _select(ctx, ch, api, preset_id: Optional[str]) -> None:
@@ -356,15 +441,63 @@ async def _confirm(ctx, ch, api, args: list[str]) -> None:
 
 
 async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
+    started = time.monotonic()
+    att: Optional[Attachment] = ctx.attachment
+    if att is not None and att.size_hint and att.size_hint > MAX_BYTES:
+        # Declared too big: say so without downloading a byte of it.
+        log("attachment_failed", chat_id=ctx.log_ref, outcome="declared_too_large")
+        await ch.send(ctx.chat_id, ch.S.FILE_TOO_LARGE)
+        return
+
     prog = await ch.begin_progress(ctx)
 
+    payload = None
+    if att is not None:
+        payload = await _fetch(ctx, ch, prog, att, turn_timeout)
+        if payload is None:
+            return
+
+    # The download already spent part of the deadline; the turn gets the rest.
+    remaining = max(1.0, turn_timeout - (time.monotonic() - started))
     try:
-        result = await api.turn(ctx.chat_id, ctx.text or "", timeout=turn_timeout)
+        result = await api.turn(ctx.chat_id, ctx.text or "",
+                                attachment=payload, timeout=remaining)
     except PlatformUnavailable:
         await _deliver(prog, [ch.S.PLATFORM_DOWN])
         return
     except PlatformError as exc:
-        text = ch.S.TURN_TIMEOUT if exc.status in (504, 0) else ch.S.UNEXPECTED
+        if payload is not None and exc.status == 422:
+            # A backend from before file support. It ignores the unknown
+            # `attachment` key, so what it 422s on is the empty content of a
+            # caption-less file. (Given a caption it would quietly answer the
+            # caption alone — which is why the backend deploys first.) Say
+            # "not yet", not "something went wrong": retrying won't help.
+            text = ch.S.FILES_NOT_SUPPORTED_YET
+        elif payload is not None and exc.status == 413:
+            # Never the file's size as far as the user can act on it: nothing
+            # over MAX_BYTES is ever sent, and the backend allows the same. It
+            # is a body limit in front of the backend smaller than a file turn
+            # (~7 MB), which only a deploy fixes. VoyageCalc's Caddy sets none
+            # today; its deploy/nav-81-sent-files.md says what one must allow.
+            log("attachment_failed", chat_id=ctx.log_ref, outcome="upload_413")
+            text = ch.S.FILE_NOT_DELIVERED
+        elif exc.status == 403:
+            # The chat was unlinked, or its account suspended, after the link
+            # check above. Say what the link check would have said.
+            text = ch.S.NOT_LINKED
+        elif exc.status == 429:
+            # The platform's ceilings: 6 messages a minute per chat, which
+            # several files selected together pass at once, and a daily one
+            # per account. Nothing broke and /new would not help; waiting does.
+            daily = exc.retry_after is not None and exc.retry_after > _BURST_WAIT_MAX
+            log("turn_rate_limited", chat_id=ctx.log_ref, retry_after=exc.retry_after,
+                kind="file" if payload is not None else "text")
+            text = ch.S.rate_limited(_wait_words(exc.retry_after), daily=daily,
+                                     file=payload is not None)
+        elif exc.status in (504, 0):
+            text = ch.S.TURN_TIMEOUT
+        else:
+            text = ch.S.UNEXPECTED
         await _deliver(prog, [text])
         return
 
@@ -397,8 +530,52 @@ async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
         except Exception as exc:  # noqa: BLE001 — one lost card ≠ a lost turn
             log_exception("confirm_card_send_failed", exc, chat_id=ctx.log_ref)
 
+    if result.get("menu") == "agents":
+        # The platform answered a plain-words "list my agents" or a switch it
+        # couldn't settle on one name, and wants the tappable menu under its
+        # reply. The reply has already landed, so a failed menu is logged
+        # rather than reported: PLATFORM_DOWN would claim the message wasn't
+        # processed when it was. A platform that predates the key never
+        # sends it, and nothing changes.
+        try:
+            await _show_agents(ctx, ch, api)
+        except Exception as exc:  # noqa: BLE001 — a lost menu ≠ a lost turn
+            log_exception("agent_menu_send_failed", exc, chat_id=ctx.log_ref)
+
     log("turn_done", chat_id=ctx.log_ref, tools=result.get("tools_used"),
-        chunks=len(chunks), outcome=result.get("stop_reason"))
+        chunks=len(chunks), outcome=result.get("stop_reason"),
+        kind="file" if payload is not None else "text")
+
+
+async def _fetch(ctx, ch, prog: Progress, att: Attachment,
+                 turn_timeout: float) -> Optional[dict[str, Any]]:
+    """Download the file and shape it for /api/bot/turn — or tell the user
+    why not and return None. The bytes live only as long as this turn."""
+    budget = min(_FETCH_MAX_SECONDS, turn_timeout * _FETCH_SHARE)
+    try:
+        data = await asyncio.wait_for(ch.fetch_attachment(att, MAX_BYTES), budget)
+    except AttachmentTooLarge as exc:
+        log("attachment_failed", chat_id=ctx.log_ref, outcome=exc.reason)
+        await _deliver(prog, [ch.S.FILE_TOO_LARGE])
+        return None
+    except AttachmentError as exc:
+        log("attachment_failed", chat_id=ctx.log_ref, outcome=exc.reason)
+        await _deliver(prog, [ch.S.FILE_UNAVAILABLE])
+        return None
+    except asyncio.TimeoutError:
+        log("attachment_failed", chat_id=ctx.log_ref, outcome="timeout")
+        await _deliver(prog, [ch.S.FILE_UNAVAILABLE])
+        return None
+    return to_payload(att, data)
+
+
+def _loggable_mime(mime: Optional[str]) -> Optional[str]:
+    """A declared type is sender-controlled text. Only something shaped like
+    a MIME type reaches the logs; anything else is just "other"."""
+    if not mime:
+        return None
+    m = mime.strip().lower()[:100]
+    return m if _MIME_SHAPE.match(m) else "other"
 
 
 async def _deliver(prog: Progress, chunks: list[str]) -> int:

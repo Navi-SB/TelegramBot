@@ -2,17 +2,26 @@
 WhatsApp channel adapter, with a fake Cloud API client and the same fake
 platform the Telegram tests use. The behavioural invariants (reveal-nothing
 gate, outputs-before-error, 409 semantics) must hold identically here."""
+import base64
+import hashlib
+import json
+import logging
+
+import httpx
 import pytest
 
 from bot.core.codec import encode, ref
 from bot.core.dispatch import handle_inbound
 from bot.platform.client import PlatformError, PlatformUnavailable
 from bot.whatsapp import strings as S
-from bot.whatsapp.api import WhatsAppError, WhatsAppUndeliverable, WhatsAppWindowClosed
+from bot.core.attachments import MAX_BYTES
+from bot.whatsapp.api import (
+    WhatsAppClient, WhatsAppError, WhatsAppUndeliverable, WhatsAppWindowClosed,
+)
 from bot.whatsapp.channel import WhatsAppChannel
 from bot.whatsapp.parse import parse_envelopes
-from tests.test_dispatch import FakeApi
-from tests.test_wa_parse import NUM, text_msg, wa_body
+from tests.test_dispatch import SEAT, FakeApi
+from tests.test_wa_parse import NUM, doc_msg, text_msg, wa_body
 
 
 class FakeWa:
@@ -149,6 +158,68 @@ async def test_a_bare_agents_word_opens_the_list_picker():
 
 
 @pytest.mark.asyncio
+async def test_the_agent_list_says_whose_agents_it_is_showing():
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}],
+                  account="Acme Shipping")
+    wa = await run(text_msg("agents"), api)
+    (_, body, _), = wa.lists
+    assert body == "Which agent should I use?\n_Showing the agents for Acme Shipping._"
+
+    wa = await run(text_msg("agents"), FakeApi(agents=api._agents))
+    (_, body, _), = wa.lists
+    assert body == S.PICK_AGENT
+
+
+@pytest.mark.asyncio
+async def test_status_names_whose_agents_the_chat_uses():
+    wa = await run(text_msg("status"), FakeApi(account="Acme Shipping"))
+    assert "*Agents from:* Acme Shipping" in wa.texts[-1][1]
+
+    wa = await run(text_msg("status"), FakeApi())
+    assert "Agents from" not in wa.texts[-1][1]
+    assert "*Account:* a@x.com" in wa.texts[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_pairing_and_status_name_a_company_login_by_company():
+    """Never the placeholder email a company login keeps (ops1@seat.invalid)."""
+    wa = await run(text_msg("LINK somecode"),
+                   FakeApi(linked=False, user=SEAT, account="Acme Shipping (ops1)"))
+    assert "seat.invalid" not in wa.all_text
+    assert wa.texts[0][1].startswith("🔗 Connected to *Olivia Ops* — Acme Shipping (ops1).\n")
+
+    wa = await run(text_msg("status"), FakeApi(user=SEAT, account="Acme Shipping (ops1)"))
+    assert "seat.invalid" not in wa.texts[-1][1]
+    assert wa.texts[-1][1].startswith("*Account:* Acme Shipping (ops1)\n*Agent:*")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("word", ["new", "status"])
+async def test_new_and_status_say_the_chats_agent_was_deleted(word):
+    api = FakeApi(active_gone="agent", account="Acme Shipping (ops1)")
+    wa = await run(text_msg(word), api)
+    assert wa.texts[-1][1].startswith(
+        "⚠️ The agent this chat was using was deleted or isn't on *Acme Shipping (ops1)*, "
+        "so this chat now answers in plain text.\n"
+    )
+    assert api.selected is None
+
+
+@pytest.mark.asyncio
+async def test_no_agent_match_names_the_account_it_searched():
+    api = FakeApi(agents=[{"id": "a1", "name": "Default", "kind": "template"}],
+                  account="alex@personal.com")
+    wa = await run(text_msg("/agent PMX Short"), api)
+    assert wa.texts[-1][1] == (
+        "No agent matches *PMX Short* in the agents for *alex@personal.com*. "
+        "Send *agents* to see the list."
+    )
+
+    wa = await run(text_msg("/agent PMX Short"), FakeApi(agents=api._agents))
+    assert wa.texts[-1][1] == "No agent matches *PMX Short*. Send *agents* to see the list."
+
+
+@pytest.mark.asyncio
 async def test_multi_word_messages_go_to_the_agent_not_the_command_router():
     api = FakeApi()
     await run(text_msg("new fixture for MV OCEAN STAR"), api)
@@ -163,11 +234,53 @@ async def test_help_needs_no_network():
     assert api.calls == []
 
 
+def test_help_says_how_to_switch_agents_by_name():
+    """Both ways: the assistant is told /agent <name> works here, and it is
+    the one the bridge reads itself, whatever the platform recognises."""
+    assert "*switch to <name>*" in S.HELP
+    assert "*/agent <name>*" in S.HELP
+
+
 @pytest.mark.asyncio
-async def test_media_gets_a_useful_refusal():
-    msg = {"from": NUM, "id": "wamid.M1", "type": "image", "image": {"id": "m1"}}
-    wa = await run(msg, FakeApi())
+async def test_agent_and_a_name_without_the_slash_is_a_message_not_a_command():
+    """'agent confirms berthing tomorrow' is a real message in this trade.
+    'switch to <name>' is recognised by the platform, inside the turn."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    await run(text_msg("agent Freight Desk"), api)
+    assert "turn" in api.calls
+    assert api.selected is None
+
+
+@pytest.mark.asyncio
+async def test_every_confirmation_names_the_bare_word_that_opens_the_menu():
+    api = FakeApi(linked=False, agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    wa = await run(text_msg("LINK somecode"), api)
+    assert "*agents*" in wa.texts[0][1]
+
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}])
+    for message in (text_msg("/agent freight desk"), text_msg("new"),
+                    interactive("list_reply", encode("a", "-"))):
+        wa = await run(message, api)
+        assert S.SWITCH_HINT in wa.texts[-1][1]
+
+    # ...and the word it names really is a command here.
+    [ctx] = parse_envelopes(wa_body([text_msg("agents")]))
+    assert ctx.command == "agents"
+
+
+@pytest.mark.asyncio
+async def test_media_gets_a_useful_refusal(caplog):
+    caplog.set_level(logging.INFO, logger="tropis.bot")
+    msg = {"from": NUM, "id": "wamid.M1", "type": "image",
+           "image": {"id": "m1", "mime_type": "image/jpeg", "caption": "MV SECRET"}}
+    api = FakeApi()
+    wa = await run(msg, api)
     assert S.TEXT_ONLY in wa.all_text
+    assert api.calls == []
+    [event] = [json.loads(r.getMessage()) for r in caplog.records]
+    assert (event["event"], event["kind"], event["mime"]) == ("media_refused", "image", "image/jpeg")
+    assert event["chat_id"] != NUM  # the keyed log ref, never the phone number
+    assert "SECRET" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +331,28 @@ async def test_a_write_proposal_becomes_reply_buttons():
     assert "vessel: MV A" in body               # the card shows the actual diff
     ids = [i for i, _ in buttons]
     assert encode("w", "y", "p1") in ids
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_asks_for_the_agent_menu_sends_the_list_after_the_reply():
+    """Same flow as Telegram through the channel abstraction: the reply goes
+    out as text, then the list message the user taps to switch."""
+    api = FakeApi(agents=[{"id": "a1", "name": "Freight Desk", "kind": "template"}],
+                  turn=turn_result(reply="No agent called PMX here.",
+                                   stop_reason="agent_menu", menu="agents"))
+    wa = await run(text_msg("switch to PMX"), api)
+    assert "No agent called PMX here." in wa.texts[0][1]
+    (_, body, rows), = wa.lists
+    assert body == S.PICK_AGENT
+    assert "Freight Desk" in [r["title"] for r in rows]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_a_menu_request_sends_no_list():
+    api = FakeApi(turn=turn_result(reply="You have 12 Panamaxes."))
+    wa = await run(text_msg("how many panamaxes?"), api)
+    assert wa.lists == []
+    assert "agents" not in api.calls
 
 
 # ---------------------------------------------------------------------------
@@ -380,3 +515,206 @@ async def test_a_short_description_turn_arrives_verbatim_and_unfenced():
     api = FakeApi(turn=turn_result(vessel_outputs=[rendered]))
     wa = await run(text_msg("Supramax 63k built 2024 ..."), api)
     assert wa.texts[0][1] == rendered
+
+
+# ---------------------------------------------------------------------------
+# files (NAV-81) — media id → fresh URL → Bearer download → the platform
+# ---------------------------------------------------------------------------
+DOCX = b"PK\x03\x04" + b"word/document.xml" * 64
+MEDIA_URL = "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=1234567890"
+
+
+class FileWa(FakeWa):
+    """FakeWa that can serve one media file."""
+
+    def __init__(self, data=DOCX, *, file_size=None, sha256="hex",
+                 media_error=None):
+        super().__init__()
+        self._data = data
+        self._file_size = str(len(data)) if file_size is None else file_size
+        if sha256 == "hex":
+            sha256 = hashlib.sha256(data).hexdigest()
+        self._sha256 = sha256
+        self._media_error = media_error
+        self.media_calls: list[str] = []
+        self.downloads: list[str] = []
+
+    async def get_media(self, media_id):
+        self.media_calls.append(media_id)
+        if self._media_error:
+            raise self._media_error
+        return {"url": f"{MEDIA_URL}&n={len(self.media_calls)}", "id": media_id,
+                "mime_type": "application/pdf", "file_size": self._file_size,
+                "sha256": self._sha256}
+
+    async def download_media(self, url, max_bytes):
+        self.downloads.append(url)
+        return self._data
+
+
+def wa_doc(caption=None, **over):
+    return doc_msg(caption, sha256=hashlib.sha256(DOCX).hexdigest(), **over)
+
+
+@pytest.mark.asyncio
+async def test_a_document_reaches_the_platform_with_its_caption_and_bytes():
+    api = FakeApi(turn=turn_result(reply="MV OCEAN STAR 82k dwt"))
+    wa = FileWa()
+    await run(wa_doc("pmx format please"), api, wa)
+    [(content, attachment)] = api.turns
+    assert content == "pmx format please"
+    assert attachment == {"filename": "Recap MV OCEAN STAR.docx",
+                          "mime_type": "application/vnd.openxmlformats-officedocument"
+                                       ".wordprocessingml.document",
+                          "data_b64": base64.b64encode(DOCX).decode()}
+    assert "MV OCEAN STAR 82k dwt" in wa.texts[0][1]
+    assert "Reading" not in wa.all_text  # no notice that would sit in the thread
+
+
+@pytest.mark.asyncio
+async def test_a_caption_less_document_sends_an_empty_instruction():
+    api = FakeApi()
+    await run(wa_doc(), api, FileWa())
+    assert api.turns[0][0] == ""
+
+
+@pytest.mark.asyncio
+async def test_a_caption_that_looks_like_a_command_goes_to_the_agent():
+    api = FakeApi()
+    await run(wa_doc("new"), api, FileWa())
+    assert api.turns[0][0] == "new"
+    assert "set_session" not in api.calls
+
+
+@pytest.mark.asyncio
+async def test_every_download_asks_meta_for_a_fresh_url():
+    """Meta's URL dies after five minutes, and a batch of turns can outlast
+    that — so the URL is never carried from the webhook or reused."""
+    api, wa = FakeApi(), FileWa()
+    await run(wa_doc(mid="wamid.D1"), api, wa)
+    await run(wa_doc(mid="wamid.D2"), api, wa)
+    assert wa.media_calls == ["1234567890", "1234567890"]
+    assert wa.downloads[0] != wa.downloads[1]
+
+
+@pytest.mark.asyncio
+async def test_an_unlinked_chat_never_asks_meta_for_the_file():
+    api, wa = FakeApi(linked=False), FileWa()
+    await run(wa_doc("describe"), api, wa)
+    assert S.NOT_LINKED in wa.all_text
+    assert wa.media_calls == [] and wa.downloads == []
+
+
+@pytest.mark.asyncio
+async def test_meta_reporting_an_oversize_file_skips_the_download():
+    api, wa = FakeApi(), FileWa(file_size=str(MAX_BYTES + 1))
+    await run(wa_doc(), api, wa)
+    assert S.FILE_TOO_LARGE in wa.all_text
+    assert wa.downloads == [] and "turn" not in api.calls
+
+
+@pytest.mark.asyncio
+async def test_a_hash_mismatch_is_unavailable_and_never_reaches_the_platform():
+    for wa, message in (
+        (FileWa(sha256="0" * 64), wa_doc()),                      # Graph's hash
+        (FileWa(sha256=None), doc_msg(None, sha256="f" * 64)),    # the webhook's
+    ):
+        api = FakeApi()
+        await run(message, api, wa)
+        assert S.FILE_UNAVAILABLE in wa.all_text
+        assert "turn" not in api.calls
+
+
+@pytest.mark.asyncio
+async def test_a_matching_hash_is_accepted_as_hex_or_base64():
+    b64 = base64.b64encode(hashlib.sha256(DOCX).digest()).decode()
+    for wa, message in ((FileWa(), wa_doc()),
+                        (FileWa(sha256=b64), doc_msg(None, sha256=b64))):
+        api = FakeApi()
+        await run(message, api, wa)
+        assert api.turns, "a matching hash must not block the file"
+
+
+@pytest.mark.asyncio
+async def test_a_graph_failure_says_the_file_was_not_processed():
+    api, wa = FakeApi(), FileWa(media_error=WhatsAppError(100, 33, "Unsupported get request"))
+    await run(wa_doc(), api, wa)
+    assert S.FILE_UNAVAILABLE in wa.all_text
+    assert "turn" not in api.calls
+
+
+@pytest.mark.asyncio
+async def test_an_old_platform_says_files_are_not_supported_yet():
+    class OldApi(FakeApi):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
+            raise PlatformError(422, [{"type": "string_too_short", "loc": ["body", "content"]}])
+
+    wa = FileWa()
+    await run(wa_doc(), OldApi(), wa)
+    assert S.FILES_NOT_SUPPORTED_YET in wa.all_text
+
+
+@pytest.mark.asyncio
+async def test_files_sent_faster_than_the_platform_takes_them_are_told_to_wait():
+    class BusyApi(FakeApi):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
+            raise PlatformError(429, "too_many_attempts", retry_after=42)
+
+    wa = FileWa()
+    await run(wa_doc(), BusyApi(), wa)
+    assert S.rate_limited("a minute", daily=False, file=True) in wa.all_text
+    assert "*that file wasn't read*" in wa.all_text
+    assert S.UNEXPECTED not in wa.all_text
+
+
+@pytest.mark.asyncio
+async def test_a_proxy_refusing_the_upload_says_the_file_was_not_passed_on():
+    class ProxiedApi(FakeApi):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
+            raise PlatformError(413, "Request Entity Too Large")
+
+    wa = FileWa()
+    await run(wa_doc(), ProxiedApi(), wa)
+    assert S.FILE_NOT_DELIVERED in wa.all_text
+    assert S.FILE_TOO_LARGE not in wa.all_text
+
+
+@pytest.mark.asyncio
+async def test_the_access_token_never_reaches_errors_or_logs(caplog):
+    """End to end over a real client: the download blows up with a transport
+    error that names the URL and the auth header, the way a careless proxy
+    or library message might. None of it may surface."""
+    caplog.set_level(logging.DEBUG)
+    token = "EAAG-wa-SECRET-access-token"
+
+    def handler(req):
+        if req.url.host == "graph.facebook.com" and req.method == "GET":
+            return httpx.Response(200, json={"url": MEDIA_URL, "file_size": "10"})
+        if req.url.host == "lookaside.fbsbx.com":
+            raise httpx.ReadError(f"reset by peer: {req.url} {req.headers['authorization']}",
+                                  request=req)
+        return httpx.Response(200, json={"messages": [{"id": "wamid.out"}]})
+
+    sent = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        wa = WhatsAppClient(token, "12345", http)
+        real_send = wa.send_text
+
+        async def send_text(to, body):
+            sent.append(body)
+            return await real_send(to, body)
+
+        wa.send_text = send_text
+        api = FakeApi()
+        await run(wa_doc(), api, wa)
+
+    assert S.FILE_UNAVAILABLE in sent
+    logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert token not in logs and "lookaside" not in logs
+    assert "ReadError" in logs  # the class, for whoever is debugging
+
+
+def test_whatsapp_file_strings_state_the_cap_and_how_to_send():
+    assert f"{MAX_BYTES // (1024 * 1024)} MB" in S.FILE_TOO_LARGE
+    assert "PDF or Word file" in S.HELP and "caption" in S.HELP
+    assert "PDF" in S.TEXT_ONLY and ".docx" in S.TEXT_ONLY

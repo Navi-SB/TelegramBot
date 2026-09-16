@@ -23,13 +23,18 @@ LINK_FAILED = (
 
 HELP = (
     "<b>Tropis assistant</b>\n\n"
-    "Just send a message to talk to your agent.\n\n"
+    "Just send a message to talk to your agent.\n"
+    "Send a PDF or Word file — a Q88, a recap — and add a caption to say what "
+    "you want.\n\n"
     "/agents — pick which of your agents to talk to\n"
+    "/agent &lt;name&gt; — switch straight to an agent by name\n"
     "/short — turn a pasted vessel description into a broker short description\n"
     "/new — start a fresh conversation with the current agent\n"
     "/status — what I'm connected to\n"
     "/unlink — disconnect this chat\n"
     "/help — this message\n\n"
+    "Plain words work too: “switch to &lt;name&gt;”, “list my agents”, "
+    "“new conversation”.\n\n"
     "<i>Library management — tags, favourites and columns — is web-app only.</i>\n"
     "<i>Telegram chats are not end-to-end encrypted.</i>"
 )
@@ -40,11 +45,37 @@ GROUPS_UNSUPPORTED = (
 )
 
 TEXT_ONLY = (
-    "I can only read text right now. Paste vessel descriptions or fixture "
-    "lines as text."
+    "I can read text, PDF files and Word (.docx) files — not photos, voice "
+    "notes or other media yet. Paste the text, or send the document itself "
+    "as a file."
 )
 
 THINKING = "⏳ Thinking…"
+
+READING_FILE = "📄 Reading the file…"
+
+# The limit is bot/core/attachments.py's MAX_BYTES; a test keeps them in step.
+FILE_TOO_LARGE = (
+    "📄 That file is too big — I can read files up to <b>5 MB</b>. Try a "
+    "smaller export, or paste the part you need as text."
+)
+
+FILE_UNAVAILABLE = (
+    "📄 I couldn't download that file from Telegram. <b>It wasn't "
+    "processed</b> — try sending it again."
+)
+
+# The platform's proxy refused the upload (a 413) although the file is within
+# the cap: a deployment limit, not something a smaller file would fix.
+FILE_NOT_DELIVERED = (
+    "📄 I couldn't pass that file on to Tropis. <b>It wasn't processed</b> — "
+    "try again later, or paste the text."
+)
+
+FILES_NOT_SUPPORTED_YET = (
+    "📄 I can't read files here yet — the platform needs an update first. "
+    "Paste the text for now."
+)
 
 PLATFORM_DOWN = (
     "🔌 I can't reach Tropis right now. <b>Your message wasn't processed</b> — "
@@ -103,30 +134,97 @@ NO_AGENTS = (
     "or just message me and I'll answer in plain text."
 )
 
-FULL_TEXT_SELECTED = "📄 Now answering in <b>plain text</b> — no agent formatting."
+# The way back to the menu, said wherever a choice is confirmed. The menu shows
+# up by itself only straight after linking, and a tester who wanted another
+# agent days later never found /agents at all — they asked the AI instead.
+SWITCH_HINT = "Switch agents any time with /agents."
+
+FULL_TEXT_SELECTED = (
+    "📄 Now answering in <b>plain text</b> — no agent formatting.\n" + SWITCH_HINT
+)
 
 
-def linked(name: str, email: str) -> str:
-    return f"🔗 Connected to <b>{name}</b> ({email})."
+def linked(name: str, account: str | None) -> str:
+    import html as _h
+
+    # The account is the email, or "Acme Shipping (ops1)" for a company login,
+    # which is why it follows a dash rather than sitting in brackets.
+    where = f" — {_h.escape(account, quote=False)}" if account else ""
+    return (
+        f"🔗 Connected to <b>{_h.escape(name, quote=False)}</b>{where}.\n"
+        "Switch agents any time with /agents, or just say "
+        "“switch to &lt;name&gt;”."
+    )
+
+
+def active_gone(kind: str, agents_of: str | None = None) -> str:
+    """Said before /new's or /status's reply when the chat's agent, format or
+    workflow can no longer be used, and the chat has just moved to plain text."""
+    import html as _h
+
+    if kind == "workflow":
+        what = "The workflow this chat was using is switched off or was deleted"
+    else:
+        where = (f"<b>{_h.escape(agents_of, quote=False)}</b>" if agents_of
+                 else "the account this chat is connected to")
+        noun = "format" if kind == "format" else "agent"
+        what = f"The {noun} this chat was using was deleted or isn't on {where}"
+    return f"⚠️ {what}, so this chat now answers in plain text.\n"
 
 
 def agent_selected(name: str, turns: int, rotated: bool) -> str:
     if rotated or turns == 0:
-        return f"● Now talking to <b>{name}</b> — starting a fresh conversation."
-    return f"● Now talking to <b>{name}</b> — resuming your {turns}-message conversation."
+        head = f"● Now talking to <b>{name}</b> — starting a fresh conversation."
+    else:
+        head = f"● Now talking to <b>{name}</b> — resuming your {turns}-message conversation."
+    return f"{head}\n{SWITCH_HINT}"
 
 
 def new_thread(name: str | None) -> str:
     who = f"<b>{name}</b>" if name else "plain text"
-    return f"🆕 Fresh conversation with {who}. The previous one is still in the web app."
-
-
-def status(account: str, agent: str | None, turns: int) -> str:
     return (
-        f"<b>Account:</b> {account}\n"
-        f"<b>Agent:</b> {agent or 'plain text (no agent)'}\n"
+        f"🆕 Fresh conversation with {who}. The previous one is still in the web app.\n"
+        + SWITCH_HINT
+    )
+
+
+def pick_agent(agents_of: str | None = None) -> str:
+    """The agent menu's header, naming whose agents these are when the
+    platform says. Said up front, a menu missing the agent you want (because
+    it lives under the other account) explains itself."""
+    if not agents_of:
+        return PICK_AGENT
+    import html as _h
+
+    return f"{PICK_AGENT}\n<i>Showing the agents for {_h.escape(agents_of, quote=False)}.</i>"
+
+
+def status(account: str, agent: str | None, turns: int, agents_of: str | None = None) -> str:
+    import html as _h
+
+    # Left out when it would only repeat the account on the line above.
+    scope = (
+        f"<b>Agents from:</b> {_h.escape(agents_of, quote=False)}\n"
+        if agents_of and agents_of != account else ""
+    )
+    return (
+        f"<b>Account:</b> {_h.escape(account, quote=False)}\n"
+        + scope
+        + f"<b>Agent:</b> {agent or 'plain text (no agent)'}\n"
         f"<b>Conversation:</b> {turns} message(s)"
     )
+
+
+def rate_limited(wait: str, *, daily: bool, file: bool) -> str:
+    """The platform turned the turn away for sending too much (a 429). `wait`
+    is how long, in words ("a minute", "about 3 hours")."""
+    what = "that file wasn't read" if file else "that message wasn't processed"
+    if daily:
+        return (f"⏳ You've reached the daily limit of messages to me, so <b>{what}</b>. "
+                f"Send it again in {wait}.")
+    many = "files" if file else "messages"
+    return (f"⏳ That's more {many} than I can take at once, so <b>{what}</b>. "
+            f"Send it again in {wait}.")
 
 
 def agent_error(error_class: str) -> str:
@@ -142,10 +240,18 @@ def tool_selected(name: str) -> str:
     )
 
 
-def no_agent_match(query: str) -> str:
+def no_agent_match(query: str, agents_of: str | None = None) -> str:
     import html as _h
 
-    return f"No agent matches <b>{_h.escape(query, quote=False)}</b>. Try /agents."
+    q = _h.escape(query, quote=False)
+    if not agents_of:
+        return f"No agent matches <b>{q}</b>. Try /agents."
+    # Naming whose agents were searched is what makes "I'm linked to the wrong
+    # account" visible from the chat. Only a linked chat ever gets here.
+    return (
+        f"No agent matches <b>{q}</b> in the agents for "
+        f"<b>{_h.escape(agents_of, quote=False)}</b>. Try /agents."
+    )
 
 
 def confirm_failed(detail: str) -> str:

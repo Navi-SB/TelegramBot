@@ -28,13 +28,17 @@ LINK_FAILED = (
 
 HELP = (
     "*Tropis assistant*\n\n"
-    "Just send a message to talk to your agent.\n\n"
+    "Just send a message to talk to your agent.\n"
+    "Send a PDF or Word file — a Q88, a recap — and add a caption to say what "
+    "you want.\n\n"
     "*agents* — pick which of your agents to talk to\n"
+    "*/agent <name>* or *switch to <name>* — go straight to an agent by name\n"
     "*short* — turn a pasted vessel description into a broker short description\n"
     "*new* — start a fresh conversation with the current agent\n"
     "*status* — what I'm connected to\n"
     "*unlink* — disconnect this chat\n"
     "*help* — this message\n\n"
+    "Plain words work too: “list my agents”, “new conversation”.\n\n"
     "_Library management — tags, favourites and columns — is web-app only._"
 )
 
@@ -44,8 +48,32 @@ GROUPS_UNSUPPORTED = (
 )
 
 TEXT_ONLY = (
-    "I can only read text right now. Paste vessel descriptions or fixture "
-    "lines as text."
+    "I can read text, PDF files and Word (.docx) files — not photos, voice "
+    "notes or other media yet. Paste the text, or send the document itself "
+    "as a file."
+)
+
+# The limit is bot/core/attachments.py's MAX_BYTES; a test keeps them in step.
+FILE_TOO_LARGE = (
+    "📄 That file is too big — I can read files up to *5 MB*. Try a smaller "
+    "export, or paste the part you need as text."
+)
+
+FILE_UNAVAILABLE = (
+    "📄 I couldn't download that file from WhatsApp. *It wasn't processed* — "
+    "try sending it again."
+)
+
+# The platform's proxy refused the upload (a 413) although the file is within
+# the cap: a deployment limit, not something a smaller file would fix.
+FILE_NOT_DELIVERED = (
+    "📄 I couldn't pass that file on to Tropis. *It wasn't processed* — "
+    "try again later, or paste the text."
+)
+
+FILES_NOT_SUPPORTED_YET = (
+    "📄 I can't read files here yet — the platform needs an update first. "
+    "Paste the text for now."
 )
 
 PLATFORM_DOWN = (
@@ -80,7 +108,13 @@ NO_AGENTS = (
     "plain text."
 )
 
-FULL_TEXT_SELECTED = "📄 Now answering in *plain text* — no agent formatting."
+# The way back to the menu, said wherever a choice is confirmed (the Telegram
+# module says why). The bare word the parser accepts, as there is no menu here.
+SWITCH_HINT = "Send *agents* any time to switch."
+
+FULL_TEXT_SELECTED = (
+    "📄 Now answering in *plain text* — no agent formatting.\n" + SWITCH_HINT
+)
 
 PICK_AGENT = "Which agent should I use?"
 
@@ -102,27 +136,73 @@ REJECTED = "❌ Change rejected."
 ALREADY_RESOLVED = "Already resolved."
 
 
-def linked(name: str, email: str) -> str:
-    return f"🔗 Connected to *{name}* ({email})."
+def linked(name: str, account: str | None) -> str:
+    # The email, or "Acme Shipping (ops1)" for a company login (the Telegram
+    # module says why it follows a dash).
+    where = f" — {account}" if account else ""
+    return (
+        f"🔗 Connected to *{name}*{where}.\n"
+        "Send *agents* any time to switch, or just say *switch to <name>*."
+    )
+
+
+def active_gone(kind: str, agents_of: str | None = None) -> str:
+    """Said before new's or status's reply when the chat's agent, format or
+    workflow can no longer be used, and the chat has just moved to plain text."""
+    if kind == "workflow":
+        what = "The workflow this chat was using is switched off or was deleted"
+    else:
+        where = f"*{agents_of}*" if agents_of else "the account this chat is connected to"
+        noun = "format" if kind == "format" else "agent"
+        what = f"The {noun} this chat was using was deleted or isn't on {where}"
+    return f"⚠️ {what}, so this chat now answers in plain text.\n"
 
 
 def agent_selected(name: str, turns: int, rotated: bool) -> str:
     if rotated or turns == 0:
-        return f"● Now talking to *{name}* — starting a fresh conversation."
-    return f"● Now talking to *{name}* — resuming your {turns}-message conversation."
+        head = f"● Now talking to *{name}* — starting a fresh conversation."
+    else:
+        head = f"● Now talking to *{name}* — resuming your {turns}-message conversation."
+    return f"{head}\n{SWITCH_HINT}"
 
 
 def new_thread(name: str | None) -> str:
     who = f"*{name}*" if name else "plain text"
-    return f"🆕 Fresh conversation with {who}. The previous one is still in the web app."
+    return (
+        f"🆕 Fresh conversation with {who}. The previous one is still in the web app.\n"
+        + SWITCH_HINT
+    )
 
 
-def status(account: str, agent: str | None, turns: int) -> str:
+def pick_agent(agents_of: str | None = None) -> str:
+    """The agent menu's header, naming whose agents these are when the
+    platform says (the Telegram module says why)."""
+    if not agents_of:
+        return PICK_AGENT
+    return f"{PICK_AGENT}\n_Showing the agents for {agents_of}._"
+
+
+def status(account: str, agent: str | None, turns: int, agents_of: str | None = None) -> str:
+    # Left out when it would only repeat the account on the line above.
+    scope = f"*Agents from:* {agents_of}\n" if agents_of and agents_of != account else ""
     return (
         f"*Account:* {account}\n"
-        f"*Agent:* {agent or 'plain text (no agent)'}\n"
+        + scope
+        + f"*Agent:* {agent or 'plain text (no agent)'}\n"
         f"*Conversation:* {turns} message(s)"
     )
+
+
+def rate_limited(wait: str, *, daily: bool, file: bool) -> str:
+    """The platform turned the turn away for sending too much (a 429). `wait`
+    is how long, in words ("a minute", "about 3 hours")."""
+    what = "that file wasn't read" if file else "that message wasn't processed"
+    if daily:
+        return (f"⏳ You've reached the daily limit of messages to me, so *{what}*. "
+                f"Send it again in {wait}.")
+    many = "files" if file else "messages"
+    return (f"⏳ That's more {many} than I can take at once, so *{what}*. "
+            f"Send it again in {wait}.")
 
 
 def agent_error(error_class: str) -> str:
@@ -138,8 +218,9 @@ def tool_selected(name: str) -> str:
     )
 
 
-def no_agent_match(query: str) -> str:
-    return f"No agent matches *{query}*. Send *agents* to see the list."
+def no_agent_match(query: str, agents_of: str | None = None) -> str:
+    where = f" in the agents for *{agents_of}*" if agents_of else ""
+    return f"No agent matches *{query}*{where}. Send *agents* to see the list."
 
 
 def confirm_failed(detail: str) -> str:

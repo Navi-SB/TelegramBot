@@ -1,4 +1,5 @@
-"""A thin Telegram Bot API client — the nine methods this bot actually uses."""
+"""A thin Telegram Bot API client — the ten methods this bot actually uses,
+plus the one file download that isn't a method."""
 from __future__ import annotations
 
 import asyncio
@@ -6,6 +7,7 @@ from typing import Any, Optional
 
 import httpx
 
+from ..core.attachments import read_capped
 from ..logging import log, log_exception
 
 
@@ -19,6 +21,9 @@ class TelegramError(RuntimeError):
 class TelegramClient:
     def __init__(self, token: str, client: httpx.AsyncClient):
         self._base = f"https://api.telegram.org/bot{token}"
+        # Downloads live under a different path that ALSO embeds the token,
+        # so neither URL may ever reach a log line or an exception message.
+        self._file_base = f"https://api.telegram.org/file/bot{token}"
         self._http = client
 
     async def _call(self, method: str, *, retries: int = 2, **params) -> Any:
@@ -52,7 +57,7 @@ class TelegramClient:
             raise TelegramError(code, desc)
         raise TelegramError(0, "unreachable")
 
-    # --- the nine methods ---------------------------------------------------
+    # --- the ten methods ----------------------------------------------------
 
     async def send_message(
         self,
@@ -167,3 +172,15 @@ class TelegramClient:
 
     async def get_me(self) -> Any:
         return await self._call("getMe")
+
+    async def get_file(self, file_id: str) -> dict[str, Any]:
+        """{file_id, file_size?, file_path?} for a file someone sent. The
+        cloud Bot API refuses files over 20 MB here with "file is too big"."""
+        return await self._call("getFile", file_id=file_id) or {}
+
+    # --- the download -------------------------------------------------------
+
+    async def download_file(self, file_path: str, max_bytes: int) -> bytes:
+        """Stream a getFile path, stopping past max_bytes. Raises only the
+        typed attachment errors, whose messages never contain the URL."""
+        return await read_capped(self._http, f"{self._file_base}/{file_path}", max_bytes)

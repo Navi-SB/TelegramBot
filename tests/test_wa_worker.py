@@ -81,9 +81,10 @@ async def test_a_turn_never_gets_more_timeout_than_the_remaining_budget():
     seen = []
 
     class TimeoutApi(ClaimApi):
-        async def turn(self, chat_id, content, *, timeout):
+        async def turn(self, chat_id, content, *, attachment=None, timeout):
             seen.append(timeout)
-            return await super().turn(chat_id, content, timeout=timeout)
+            return await super().turn(chat_id, content, attachment=attachment,
+                                      timeout=timeout)
 
     api = TimeoutApi({})
     t = [0.0]

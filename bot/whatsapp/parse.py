@@ -10,11 +10,18 @@ Command grammar, since WhatsApp has no /command menu:
   - a single bare word (agents / new / status / unlink / help / menu) is a
     command; anything multi-word is a message for the agent — "new fixture
     for MV X" must never be swallowed
+  - so "agent <name>" without the slash is NOT a command either: "agent
+    confirms berthing tomorrow" is a real message in this trade. Switching by
+    name is "/agent <name>", or plain "switch to <name>", which the platform
+    recognises on its own before any AI runs
+  - a document's caption is never a command at all: "new" under a recap is
+    about the recap
 """
 from __future__ import annotations
 
 from typing import Any, Optional
 
+from ..core.attachments import Attachment
 from ..core.dispatch import Inbound
 from ..logging import log
 from .render import log_ref
@@ -22,10 +29,10 @@ from .render import log_ref
 _BARE_WORDS = {"agents", "new", "status", "unlink", "help", "menu",
                "short", "shortdesc", "shortdescr"}
 # "unsupported" is deliberately in MEDIA, not IGNORED: the user actively sent
-# something (a poll, view-once media) and must hear that the bot is text-only.
+# something (a poll, view-once media) and must hear what the bot can read.
+# "document" is not here — files are read (see the document branch below).
 _MEDIA_TYPES = {
-    "image", "video", "audio", "document", "sticker", "location", "contacts",
-    "unsupported",
+    "image", "video", "audio", "sticker", "location", "contacts", "unsupported",
 }
 _IGNORED_TYPES = {"reaction", "system", "ephemeral", "order", "request_welcome"}
 
@@ -72,6 +79,8 @@ def _parse_message(m: dict[str, Any], names: dict[str, Optional[str]]) -> Option
     args = ""
     callback_data: Optional[str] = None
     media = False
+    media_mime: Optional[str] = None
+    attachment: Optional[Attachment] = None
 
     if mtype == "text":
         text = (m.get("text") or {}).get("body") or ""
@@ -86,8 +95,23 @@ def _parse_message(m: dict[str, Any], names: dict[str, Optional[str]]) -> Option
         callback_data = reply.get("id")
         if not callback_data:
             return None  # flow replies etc. — nothing we handle
-    elif mtype in _MEDIA_TYPES:
+    elif mtype == "document" and (m.get("document") or {}).get("id"):
+        doc = m["document"]
+        # The media id only. The file is fetched later, and only for a linked
+        # chat — Meta's download URL expires in five minutes anyway, so the
+        # channel asks for a fresh one at that point.
+        attachment = Attachment(
+            ref=str(doc["id"]),
+            file_name=doc.get("filename"),
+            mime_hint=doc.get("mime_type"),
+            sha256=str(doc["sha256"]) if doc.get("sha256") else None,
+        )
+        caption = doc.get("caption")
+        text = caption if caption and caption.strip() else None
+    elif mtype in _MEDIA_TYPES or mtype == "document":  # a document with no id can't be fetched
         media = True
+        body = m.get(mtype)
+        media_mime = body.get("mime_type") if isinstance(body, dict) else None
     else:
         return None
 
@@ -105,6 +129,9 @@ def _parse_message(m: dict[str, Any], names: dict[str, Optional[str]]) -> Option
         is_private=True,  # the Cloud API only delivers 1:1 traffic
         blocked=False,    # WhatsApp has no inbound block signal; learned send-side
         log_ref=log_ref(frm),
+        attachment=attachment,
+        media_kind=mtype if media else None,
+        media_mime=media_mime,
     )
 
 

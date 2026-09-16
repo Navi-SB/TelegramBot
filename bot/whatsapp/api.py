@@ -1,4 +1,4 @@
-"""A thin WhatsApp Cloud API client — the four calls this bot actually makes.
+"""A thin WhatsApp Cloud API client — the six calls this bot actually makes.
 
 Plain HTTPS against graph.facebook.com; Meta archived its SDK in 2023 and raw
 POSTs are the norm. Same philosophy as the Telegram client: no framework, one
@@ -13,19 +13,26 @@ The error codes that matter:
   131047           the 24h customer-service window closed — cannot happen to a
                    purely reactive bot except on Meta's extreme retry tail;
                    nothing useful can be sent without a paid template
+
+Inbound files arrive as a media id, not bytes. Fetching one is two calls:
+GET /{media_id} for a download URL (valid five minutes; asking again mints a
+fresh one), then a GET of that URL with the same Bearer token.
 """
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+import re
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
+from ..core.attachments import read_capped
 from ..logging import log_exception
 
 GRAPH = "https://graph.facebook.com"
 _RETRYABLE = {130429, 131056, 80007}  # throughput / pair / WABA rate limits
 _TRANSIENT = {1, 2}  # Graph "API Unknown" / "API Service" — Meta says wait and retry
+_MEDIA_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # fullmatch — it goes into a URL path
 
 
 class WhatsAppError(RuntimeError):
@@ -49,15 +56,24 @@ class WhatsAppClient:
         self, token: str, phone_number_id: str, client: httpx.AsyncClient,
         graph_version: str = "v26.0",
     ):
-        self._url = f"{GRAPH}/{graph_version}/{phone_number_id}/messages"
+        self._graph = f"{GRAPH}/{graph_version}"
+        self._url = f"{self._graph}/{phone_number_id}/messages"
         self._headers = {"Authorization": f"Bearer {token}"}
         self._http = client
 
     async def _call(self, payload: dict[str, Any], *, retries: int = 2) -> Any:
         payload = {"messaging_product": "whatsapp", **payload}
+        return await self._ladder(
+            lambda: self._http.post(self._url, json=payload, headers=self._headers),
+            retries=retries,
+        )
+
+    async def _ladder(
+        self, send: Callable[[], Awaitable[httpx.Response]], *, retries: int
+    ) -> Any:
         for attempt in range(retries + 1):
             try:
-                r = await self._http.post(self._url, json=payload, headers=self._headers)
+                r = await send()
                 body = r.json()
             except Exception as exc:  # transport
                 if attempt == retries:
@@ -96,7 +112,7 @@ class WhatsAppClient:
         except Exception:
             return None
 
-    # --- the four calls -----------------------------------------------------
+    # --- the six calls ------------------------------------------------------
 
     async def send_text(self, to: str, body: str) -> Optional[str]:
         res = await self._call({
@@ -156,3 +172,19 @@ class WhatsAppClient:
             await self._call(payload, retries=0)
         except Exception:
             pass
+
+    async def get_media(self, media_id: str) -> dict[str, Any]:
+        """{url, mime_type, sha256, file_size, id} for an inbound media id.
+        Called at download time, never earlier: the url dies in five minutes,
+        and a batch of turns can easily take longer than that."""
+        if not _MEDIA_ID.fullmatch(media_id):
+            raise WhatsAppError(0, None, "malformed media id")
+        return await self._ladder(
+            lambda: self._http.get(f"{self._graph}/{media_id}", headers=self._headers),
+            retries=1,
+        )
+
+    async def download_media(self, url: str, max_bytes: int) -> bytes:
+        """Stream a get_media url with the Bearer token, stopping past
+        max_bytes. Raises only the typed attachment errors."""
+        return await read_capped(self._http, url, max_bytes, headers=self._headers)
