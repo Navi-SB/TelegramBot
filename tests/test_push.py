@@ -154,7 +154,7 @@ async def test_a_retry_does_not_send_the_report_twice(monkeypatch):
     api, tg = _wire(monkeypatch, FakeApi(fresh=False))
     res = await push.handle(_req(BODY))
 
-    assert res.body == {"ok": True, "duplicate": True}
+    assert res.body == {"ok": False, "reason": "duplicate_unknown", "certain": False}
     assert api.claimed == ["push:run-1:send"] and tg.sent == []
 
 
@@ -180,7 +180,7 @@ async def test_it_is_closed_until_a_secret_is_configured(monkeypatch):
     monkeypatch.delenv("BOT_PUSH_SECRET", raising=False)
     _wire(monkeypatch)
     res = await push.handle(_req(BODY))
-    assert res.status == 503 and res.body["error"] == "push_not_configured"
+    assert res.status == 200 and res.body["reason"] == "not_configured" and res.body["certain"]
 
 
 @pytest.mark.asyncio
@@ -189,3 +189,71 @@ async def test_a_long_report_is_split_rather_than_rejected(monkeypatch):
     _, tg = _wire(monkeypatch)
     res = await push.handle(_req({**BODY, "text": "line\n" * 2000}))
     assert res.body["ok"] is True and len(tg.sent) > 1
+
+
+@pytest.mark.asyncio
+async def test_first_chunk_rate_limit_is_safe_to_retry(monkeypatch):
+    from bot.telegram.api import TelegramError
+    _wire(monkeypatch, tg=FakeTg(error=TelegramError(429, "Too many requests")))
+    res = await push.handle(_req(BODY))
+    assert res.body["reason"] == "rate_limited" and res.body["certain"] is True
+    assert res.body["sent_chunks"] == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_delivery_is_never_certified_safe_to_retry(monkeypatch):
+    from bot.telegram.api import TelegramError
+    class PartialTg(FakeTg):
+        async def send_safe(self, chat_id, html, **kw):
+            assert kw["retries"] == 0
+            if self.sent:
+                raise TelegramError(429, "Too many requests")
+            self.sent.append((chat_id, html))
+            return 1
+    _wire(monkeypatch, tg=PartialTg())
+    res = await push.handle(_req({**BODY, "text": "line\n" * 2000}))
+    assert res.body["certain"] is False and res.body["sent_chunks"] == 1
+
+
+@pytest.mark.asyncio
+async def test_server_error_is_unknown_even_on_first_chunk(monkeypatch):
+    from bot.telegram.api import TelegramError
+    _wire(monkeypatch, tg=FakeTg(error=TelegramError(502, "Unavailable")))
+    res = await push.handle(_req(BODY))
+    assert res.body["certain"] is False
+
+
+@pytest.mark.asyncio
+async def test_report_too_large_is_rejected_without_truncation(monkeypatch):
+    _, tg = _wire(monkeypatch)
+    res = await push.handle(_req({**BODY, "text": "x" * (push.MAX_TEXT + 1)}))
+    assert res.status == 400 and res.body["error"] == "message_too_long"
+    assert res.body["certain"] and not tg.sent
+
+
+@pytest.mark.asyncio
+async def test_send_message_does_not_repeat_after_a_transport_timeout(monkeypatch):
+    import httpx
+    from bot.telegram.api import TelegramClient
+    calls = []
+    async def request(req):
+        calls.append(req)
+        raise httpx.ReadTimeout("response lost")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(request)) as client:
+        tg = TelegramClient("test-token", client)
+        with pytest.raises(httpx.ReadTimeout):
+            await tg.send_safe("chat", "report")
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["get_link", "claim_event"])
+async def test_platform_failure_before_send_is_a_definite_refusal(monkeypatch, method):
+    from bot.platform.client import PlatformUnavailable
+    api, tg = _wire(monkeypatch)
+    async def unavailable(*args, **kwargs):
+        raise PlatformUnavailable(503, "offline")
+    monkeypatch.setattr(api, method, unavailable)
+    res = await push.handle(_req(BODY))
+    assert not res.body["ok"] and res.body["certain"]
+    assert res.body["reason"] == "bridge_unavailable" and not tg.sent

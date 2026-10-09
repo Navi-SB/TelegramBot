@@ -26,14 +26,14 @@ class TelegramClient:
         self._file_base = f"https://api.telegram.org/file/bot{token}"
         self._http = client
 
-    async def _call(self, method: str, *, retries: int = 2, **params) -> Any:
+    async def _call(self, method: str, *, retries: int = 2, retry_transport: bool = True, **params) -> Any:
         payload = {k: v for k, v in params.items() if v is not None}
         for attempt in range(retries + 1):
             try:
                 r = await self._http.post(f"{self._base}/{method}", json=payload)
                 body = r.json()
             except Exception as exc:  # transport
-                if attempt == retries:
+                if attempt == retries or not retry_transport:
                     raise
                 log_exception("telegram_transport_retry", exc)
                 await asyncio.sleep(0.5 * (attempt + 1))
@@ -51,7 +51,7 @@ class TelegramClient:
                 if attempt < retries:
                     await asyncio.sleep(wait + 0.25)
                     continue
-            if code >= 500 and attempt < retries:
+            if code >= 500 and attempt < retries and retry_transport:
                 await asyncio.sleep(0.5 * (attempt + 1))
                 continue
             raise TelegramError(code, desc)
@@ -66,9 +66,12 @@ class TelegramClient:
         *,
         parse_mode: Optional[str] = "HTML",
         reply_markup: Optional[dict] = None,
+        retries: int = 2,
     ) -> int:
         res = await self._call(
             "sendMessage",
+            retries=retries,
+            retry_transport=False,
             chat_id=chat_id,
             text=text,
             parse_mode=parse_mode,
@@ -78,7 +81,7 @@ class TelegramClient:
         return res["message_id"]
 
     async def send_safe(
-        self, chat_id: str | int, html: str, *, reply_markup: Optional[dict] = None
+        self, chat_id: str | int, html: str, *, reply_markup: Optional[dict] = None, retries: int = 2,
     ) -> Optional[int]:
         """Send as HTML; on a parse failure resend the same content as plain
         text with tags stripped.
@@ -88,15 +91,15 @@ class TelegramClient:
         of the characters that cause it.
         """
         try:
-            return await self.send_message(chat_id, html, reply_markup=reply_markup)
+            return await self.send_message(chat_id, html, reply_markup=reply_markup, retries=retries)
         except TelegramError as exc:
-            if "can't parse entities" not in exc.description.lower():
+            if exc.code != 400 or "can't parse entities" not in exc.description.lower():
                 raise
             from .html import strip_tags
 
             log("telegram_html_fallback", status=exc.code)
             return await self.send_message(
-                chat_id, strip_tags(html), parse_mode=None, reply_markup=reply_markup
+                chat_id, strip_tags(html), parse_mode=None, reply_markup=reply_markup, retries=retries,
             )
 
     async def edit_message_text(

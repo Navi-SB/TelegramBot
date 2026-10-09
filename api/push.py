@@ -28,10 +28,9 @@ PLAIN TEXT, NEVER MARKDOWN
     clickable link from a bot the broker trusts. Everything is escaped, and a
     provenance line built HERE — not by the caller — says which workflow spoke.
 
-HTTP 200 MEANS DECIDED
-    200 {"ok": true} sent, 200 {"ok": false, "reason": …} refused for a reason
-    the caller can explain to a person. 5xx means we genuinely don't know, and
-    the caller must not claim either way.
+DELIVERY CERTAINTY
+    ok:true means every chunk was acknowledged. A refusal includes certain:true
+    only when NO chunk was sent. A claimed key alone cannot prove delivery.
 """
 from __future__ import annotations
 
@@ -55,32 +54,38 @@ async def handle(req):
     if not cfg.push_secret:
         # Closed by default, exactly like the platform's own service-token
         # dependency: deploying this before the secret exists opens nothing.
-        return Resp(503, {"ok": False, "error": "push_not_configured"})
+        return Resp(200, {"ok": False, "reason": "not_configured", "certain": True})
     if not verify(req.headers, req.body, cfg.push_secret):
         # Two different problems wearing one status code otherwise: a key
         # mismatch is a deploy error, a stale timestamp is clock drift between
         # two machines. Say which.
         reason = "stale_timestamp" if stale_timestamp(req.headers) else "bad_signature"
         log("push_rejected", reason=reason)
-        return Resp(401, {"ok": False, "error": reason})
+        return Resp(401, {"ok": False, "error": reason, "certain": True})
 
     try:
         payload = json.loads(req.body or b"{}")
     except ValueError:
-        return Resp(400, {"ok": False, "error": "invalid_json"})
+        return Resp(400, {"ok": False, "error": "invalid_json", "certain": True})
+    if not isinstance(payload, dict):
+        return Resp(400, {"ok": False, "error": "invalid_json", "certain": True})
 
     channel = str(payload.get("channel") or "telegram")
     chat_id = str(payload.get("chat_id") or "")
-    text = str(payload.get("text") or "")[:MAX_TEXT]
+    text = str(payload.get("text") or "")
     source = str(payload.get("source") or "")
     key = str(payload.get("idempotency_key") or "")
     if not chat_id or not text.strip():
-        return Resp(400, {"ok": False, "error": "chat_id_and_text_required"})
+        return Resp(400, {"ok": False, "error": "chat_id_and_text_required", "certain": True})
+    if len(text) > MAX_TEXT:
+        return Resp(400, {"ok": False, "error": "message_too_long", "certain": True})
+    if not key or len(key) > 512:
+        return Resp(400, {"ok": False, "error": "idempotency_key_required", "certain": True})
     if channel != "telegram":
         # WhatsApp's 24-hour window makes an unprompted message a coin flip,
         # and outside it Meta wants an approved template. Until there is one,
         # this endpoint is Telegram's.
-        return Resp(200, {"ok": False, "reason": "unsupported_channel"})
+        return Resp(200, {"ok": False, "reason": "unsupported_channel", "certain": True})
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as http:
         api = PlatformClient(cfg.api_base, cfg.service_token, http, channel=channel)
@@ -90,11 +95,12 @@ async def handle(req):
             link = await api.get_link(chat_id)
         except PlatformUnavailable as exc:
             log_exception("push_link_check_failed", exc)
-            return Resp(502, {"ok": False, "reason": "upstream", "detail": "link check failed"})
+            return Resp(200, {"ok": False, "reason": "bridge_unavailable", "certain": True,
+                              "detail": "link check failed before sending"})
         if not link.get("linked"):
-            return Resp(200, {"ok": False, "reason": "unlinked"})
+            return Resp(200, {"ok": False, "reason": "unlinked", "certain": True})
         if link.get("blocked"):
-            return Resp(200, {"ok": False, "reason": "blocked"})
+            return Resp(200, {"ok": False, "reason": "blocked", "certain": True})
 
         # A timeout on the caller's side can fire after we already sent, and
         # its retry would deliver the report twice. Same machinery the webhook
@@ -102,16 +108,21 @@ async def handle(req):
         if key:
             try:
                 if not await api.claim_event(f"push:{key}"):
-                    return Resp(200, {"ok": True, "duplicate": True})
+                    return Resp(200, {"ok": False, "reason": "duplicate_unknown", "certain": False})
             except PlatformUnavailable as exc:
                 log_exception("push_claim_failed", exc)
-                return Resp(502, {"ok": False, "reason": "upstream", "detail": "claim failed"})
+                return Resp(200, {"ok": False, "reason": "bridge_unavailable", "certain": True,
+                                  "detail": "claim failed before sending"})
 
         header = f"🔁 <b>{esc(source)}</b>\n\n" if source else ""
         chunks = split_html(header + esc(text))
+        sent_chunks = 0
         try:
             for chunk in chunks:
-                await tg.send_safe(chat_id, chunk)
+                # The platform persists rate-limit backoff. No hidden retries
+                # may send after its request has timed out.
+                await tg.send_safe(chat_id, chunk, retries=0)
+                sent_chunks += 1
         except TelegramError as exc:
             blocked = exc.code == 403
             if blocked:
@@ -121,8 +132,10 @@ async def handle(req):
                 except PlatformUnavailable:
                     pass
             log("push_failed", code=exc.code, blocked=blocked)
-            return Resp(200, {"ok": False, "reason": "blocked" if blocked else "refused",
-                              "detail": exc.description})
+            reason = "blocked" if blocked else "rate_limited" if exc.code == 429 else "refused"
+            return Resp(200, {"ok": False, "reason": reason,
+                              "certain": sent_chunks == 0 and 400 <= exc.code < 500,
+                              "sent_chunks": sent_chunks, "detail": exc.description})
         except Exception as exc:  # noqa: BLE001 — we cannot say whether it landed
             log_exception("push_unknown", exc)
             return Resp(502, {"ok": False, "reason": "upstream", "detail": type(exc).__name__})
