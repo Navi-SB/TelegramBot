@@ -7,11 +7,27 @@ have already paired, rather than impersonating anyone by id.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
+from urllib.parse import unquote
 
 import httpx
 
 CHANNEL = "telegram"  # default; WhatsApp passes channel="whatsapp"
+
+# A report render runs inside an export's approve, so /confirm can take far
+# longer than the worker client's 30 s default. Local renders took 0.2-5 s;
+# this leaves room for a slow server without outliving the function.
+CONFIRM_TIMEOUT = 90.0
+
+# The most a report file may be. A Period Rundown image is under 1 MB and its
+# PDF under 20 KB; anything near this is not a file a chat should be sent,
+# and reading stops here rather than holding the whole body in memory.
+FILE_MAX_BYTES = 20 * 1024 * 1024
+
+_EXT = {"image/png": "png", "application/pdf": "pdf"}
+_FILENAME_STAR = re.compile(r"(?:^|;)\s*filename\*\s*=\s*([^;]+)", re.I)
+_FILENAME = re.compile(r'(?:^|;)\s*filename\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;]+))', re.I)
 
 
 class PlatformError(RuntimeError):
@@ -47,13 +63,7 @@ class PlatformClient:
         except Exception as exc:
             raise PlatformUnavailable(0, type(exc).__name__) from exc
         if r.status_code >= 400:
-            try:
-                detail = r.json().get("detail")
-            except Exception:
-                detail = r.text[:120]
-            wait = r.headers.get("retry-after", "").strip()
-            raise PlatformError(r.status_code, detail,
-                                retry_after=int(wait) if wait.isdigit() else None)
+            raise _error(r)
         return r.json() if r.content else {}
 
     # --- dedupe -------------------------------------------------------------
@@ -125,7 +135,87 @@ class PlatformClient:
         return await self._call("POST", "/api/bot/turn", json=body, timeout=timeout)
 
     async def confirm(self, chat_id: str, pending_id: str, action: str) -> dict[str, Any]:
+        """Approve or reject. An approve answers {status, tool_name, after}
+        and, from a backend that knows them, `reply`, `vessel_outputs` and
+        `files` saying what the change did. An older one sends none of them."""
         return await self._call("POST", "/api/bot/confirm", json={
             "channel": self._channel, "chat_id": chat_id,
             "pending_id": pending_id, "action": action,
-        })
+        }, timeout=CONFIRM_TIMEOUT)
+
+    # --- report files -------------------------------------------------------
+
+    async def file(self, chat_id: str, export_id: int) -> tuple[bytes, str, str]:
+        """(bytes, mime, filename) of one export a turn or an approve listed
+        under `files`. POST so the chat id stays out of access logs.
+
+        Errors map exactly as every other call: PlatformUnavailable when the
+        backend can't be reached, PlatformError with the backend's sentence
+        as `detail` otherwise (404 not on this desk, 410 removed). A body over
+        FILE_MAX_BYTES is a PlatformError(413) without reading the rest."""
+        body = {"channel": self._channel, "chat_id": chat_id, "export_id": int(export_id)}
+        try:
+            async with self._http.stream(
+                "POST", f"{self._base}/api/bot/files", headers=self._headers, json=body,
+            ) as r:
+                if r.status_code >= 400:
+                    await r.aread()
+                    raise _error(r)
+                declared = r.headers.get("content-length", "")
+                if declared.isdigit() and int(declared) > FILE_MAX_BYTES:
+                    raise PlatformError(413, "file_too_large")
+                buf = bytearray()
+                async for chunk in r.aiter_bytes():
+                    buf += chunk
+                    if len(buf) > FILE_MAX_BYTES:
+                        raise PlatformError(413, "file_too_large")
+                mime = r.headers.get("content-type", "").split(";")[0].strip().lower()
+                name = filename_from(r.headers.get("content-disposition"), mime)
+        except PlatformError:
+            raise
+        except Exception as exc:
+            raise PlatformUnavailable(0, type(exc).__name__) from exc
+        return bytes(buf), mime, name
+
+
+def _error(r: httpx.Response) -> PlatformError:
+    try:
+        detail = r.json().get("detail")
+    except Exception:
+        detail = r.text[:120]
+    wait = r.headers.get("retry-after", "").strip()
+    return PlatformError(r.status_code, detail,
+                         retry_after=int(wait) if wait.isdigit() else None)
+
+
+def filename_from(disposition: Optional[str], mime: str) -> str:
+    """The file name a Content-Disposition gives: the RFC 5987 `filename*`
+    first (it carries the real, non-ASCII name), then the plain `filename`,
+    then "Period Rundown.<ext>". Never a path: separators and control
+    characters are dropped, since the name is shown to the user as is."""
+    ext = _EXT.get(mime)
+    fallback = f"Period Rundown.{ext}" if ext else "Period Rundown"
+    value = disposition or ""
+    name = None
+    star = _FILENAME_STAR.search(value)
+    if star:
+        raw = star.group(1).strip().strip('"')
+        charset, sep, rest = raw.partition("'")
+        if sep:
+            _lang, sep, encoded = rest.partition("'")
+            if sep:
+                try:
+                    name = unquote(encoded, encoding=charset or "utf-8", errors="strict")
+                except (LookupError, UnicodeDecodeError):
+                    name = None
+    if not name:
+        plain = _FILENAME.search(value)
+        if plain:
+            quoted, bare = plain.group(1), plain.group(2)
+            name = re.sub(r"\\(.)", r"\1", quoted) if quoted is not None else (bare or "").strip()
+    name = "".join(c for c in (name or "") if c >= " " and c != "\x7f" and c not in "/\\")
+    name = name.strip(" .")
+    if len(name) > 200:  # keep the extension, which is what opens the file
+        stem, dot, ext_ = name.rpartition(".")
+        name = (stem[:200 - len(ext_) - 1] + dot + ext_) if dot and len(ext_) <= 8 else name[:200]
+    return name or fallback

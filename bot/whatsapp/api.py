@@ -1,4 +1,4 @@
-"""A thin WhatsApp Cloud API client — the six calls this bot actually makes.
+"""A thin WhatsApp Cloud API client — the calls this bot actually makes.
 
 Plain HTTPS against graph.facebook.com; Meta archived its SDK in 2023 and raw
 POSTs are the norm. Same philosophy as the Telegram client: no framework, one
@@ -16,7 +16,9 @@ The error codes that matter:
 
 Inbound files arrive as a media id, not bytes. Fetching one is two calls:
 GET /{media_id} for a download URL (valid five minutes; asking again mints a
-fresh one), then a GET of that URL with the same Bearer token.
+fresh one), then a GET of that URL with the same Bearer token. Outbound files
+are the reverse: a multipart POST to /{phone_number_id}/media for an id, then
+an image or document message naming that id.
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ GRAPH = "https://graph.facebook.com"
 _RETRYABLE = {130429, 131056, 80007}  # throughput / pair / WABA rate limits
 _TRANSIENT = {1, 2}  # Graph "API Unknown" / "API Service" — Meta says wait and retry
 _MEDIA_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # fullmatch — it goes into a URL path
+CAPTION_LIMIT = 1024  # image and document captions
 
 
 class WhatsAppError(RuntimeError):
@@ -58,6 +61,7 @@ class WhatsAppClient:
     ):
         self._graph = f"{GRAPH}/{graph_version}"
         self._url = f"{self._graph}/{phone_number_id}/messages"
+        self._media_url = f"{self._graph}/{phone_number_id}/media"
         self._headers = {"Authorization": f"Bearer {token}"}
         self._http = client
 
@@ -112,7 +116,7 @@ class WhatsAppClient:
         except Exception:
             return None
 
-    # --- the six calls ------------------------------------------------------
+    # --- the calls ----------------------------------------------------------
 
     async def send_text(self, to: str, body: str) -> Optional[str]:
         res = await self._call({
@@ -159,6 +163,44 @@ class WhatsAppClient:
                     "sections": [{"title": section_title[:24], "rows": rows[:10]}],
                 },
             },
+        })
+        return self._wamid(res)
+
+    async def upload_media(self, data: bytes, mime: str, filename: str) -> str:
+        """Upload a file for sending; Meta answers with a media id.
+        Through the same ladder as sends: a retried upload costs at
+        most an unused copy on Meta's side, never a second message."""
+        res = await self._ladder(
+            lambda: self._http.post(
+                self._media_url,
+                data={"messaging_product": "whatsapp", "type": mime},
+                files={"file": (filename, data, mime)},
+                headers=self._headers,
+            ),
+            retries=2,
+        )
+        media_id = str((res or {}).get("id") or "")
+        if not _MEDIA_ID.fullmatch(media_id):
+            raise WhatsAppError(0, None, "malformed media id")
+        return media_id
+
+    async def send_image(self, to: str, media_id: str, caption: Optional[str] = None) -> Optional[str]:
+        image: dict[str, Any] = {"id": media_id}
+        if caption:
+            image["caption"] = caption[:CAPTION_LIMIT]
+        res = await self._call({
+            "recipient_type": "individual", "to": to, "type": "image", "image": image,
+        })
+        return self._wamid(res)
+
+    async def send_document(
+        self, to: str, media_id: str, filename: str, caption: Optional[str] = None,
+    ) -> Optional[str]:
+        document: dict[str, Any] = {"id": media_id, "filename": filename}
+        if caption:
+            document["caption"] = caption[:CAPTION_LIMIT]
+        res = await self._call({
+            "recipient_type": "individual", "to": to, "type": "document", "document": document,
         })
         return self._wamid(res)
 
