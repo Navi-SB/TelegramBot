@@ -20,7 +20,9 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
 from ..logging import log, log_exception
-from ..platform.client import PlatformClient, PlatformError, PlatformUnavailable
+from ..platform.client import (
+    CONFIRM_TIMEOUT, PlatformClient, PlatformError, PlatformUnavailable,
+)
 from .attachments import (
     MAX_BYTES, Attachment, AttachmentError, AttachmentTooLarge, to_payload,
 )
@@ -37,6 +39,21 @@ _FETCH_MAX_SECONDS = 60.0
 # also free a slot within a minute, and then reads as the per-minute one:
 # sending it again in a minute is still right.
 _BURST_WAIT_MAX = 120
+
+# An approve's /confirm may render a report, so it waits up to
+# CONFIRM_TIMEOUT — but never past the chat's own deadline, which on WhatsApp
+# is what is left of a batch's function budget. This much of that deadline is
+# kept back for the messages that follow the approve; past the deadline the
+# function is killed, after the change has been made, with nothing sent.
+_AFTER_CONFIRM_SECONDS = 10.0
+_CONFIRM_MIN_SECONDS = 5.0
+
+# A report file is not started with less than this left before the deadline.
+_FILE_MIN_SECONDS = 5.0
+
+# How httpx says the request never left: the platform cannot have acted on it.
+# Anything else (a read timeout, a dropped connection) may have reached it.
+_NEVER_SENT = frozenset({"ConnectError", "ConnectTimeout", "PoolTimeout"})
 
 
 def _wait_words(seconds: Optional[int]) -> str:
@@ -136,9 +153,26 @@ class Channel(Protocol):
     """What a messaging channel must provide for the core to drive it."""
 
     S: Any  # the channel's strings module
+    # The biggest image the channel takes as a photo; a bigger one goes as a
+    # document instead where IMAGE_AS_DOCUMENT, and is otherwise not sent
+    # (the chat gets S.IMAGE_TOO_BIG).
+    PHOTO_MAX_BYTES: int
+    IMAGE_AS_DOCUMENT: bool
 
     async def ack(self, ctx: Inbound) -> None: ...
     async def send(self, chat_id: str, text: str) -> None: ...
+    async def send_photo(
+        self, chat_id: str, data: bytes, *, filename: str,
+        caption: Optional[str] = None, mime: str = "image/png",
+    ) -> Optional[bool]:
+        """Post an image the user sees inline. `caption` is plain text; the
+        channel clips and escapes it. False means the channel swallowed the
+        send (the chat is unreachable) and already logged why."""
+        ...
+    async def send_document(
+        self, chat_id: str, data: bytes, *, filename: str,
+        caption: Optional[str] = None, mime: str = "application/pdf",
+    ) -> Optional[bool]: ...
     async def send_agent_picker(
         self, chat_id: str, agents: list[dict[str, Any]], page: int, title: str,
         *, extras: bool = True,
@@ -200,7 +234,7 @@ async def handle_inbound(
             else:
                 await ch.send(ctx.chat_id, S.NOT_LINKED)
         elif ctx.callback_data:
-            await _callback(ctx, ch, api)
+            await _callback(ctx, ch, api, turn_timeout=turn_timeout)
         elif ctx.attachment is not None:
             # Only here, past the link check: an unlinked chat must never be
             # able to make the bot download anything.
@@ -378,7 +412,7 @@ async def _select(ctx, ch, api, preset_id: Optional[str]) -> None:
 # --- callbacks --------------------------------------------------------------
 
 
-async def _callback(ctx, ch, api) -> None:
+async def _callback(ctx, ch, api, *, turn_timeout: float) -> None:
     op, args = decode(ctx.callback_data or "")
     if op is None:
         await ch.send(ctx.chat_id, ch.S.STALE_MENU)
@@ -399,7 +433,7 @@ async def _callback(ctx, ch, api) -> None:
             return
         await _select(ctx, ch, api, match["id"])
     elif op == "w":
-        await _confirm(ctx, ch, api, args)
+        await _confirm(ctx, ch, api, args, turn_timeout=turn_timeout)
     elif op == "ul":
         if args and args[0] == "y":
             await api.revoke(ctx.chat_id)
@@ -417,15 +451,24 @@ def _is_already_resolved(detail: Any) -> bool:
     return "already" in d or "not pending" in d
 
 
-async def _confirm(ctx, ch, api, args: list[str]) -> None:
+async def _confirm(ctx, ch, api, args: list[str], *, turn_timeout: float) -> None:
     if len(args) < 2:
         return
     decision, pending_id = args[0], args[1]
     action = "approve" if decision == "y" else "reject"
+    deadline = time.monotonic() + turn_timeout
+    wait = max(_CONFIRM_MIN_SECONDS,
+               min(CONFIRM_TIMEOUT, turn_timeout - _AFTER_CONFIRM_SECONDS))
     try:
-        await api.confirm(ctx.chat_id, pending_id, action)
-        await ch.send(ctx.chat_id,
-                      ch.S.APPROVED if action == "approve" else ch.S.REJECTED)
+        res = await api.confirm(ctx.chat_id, pending_id, action, timeout=wait)
+    except PlatformUnavailable as exc:
+        if action != "approve" or exc.detail in _NEVER_SENT:
+            raise  # never reached the platform: "wasn't processed" is true
+        # No answer in time, but the platform had the tap and may have made
+        # the change. "Your message wasn't processed" could be false.
+        log("confirm_no_answer", chat_id=ctx.log_ref, outcome=exc.detail)
+        await ch.send(ctx.chat_id, ch.S.CONFIRM_NO_ANSWER)
+        return
     except PlatformError as exc:
         if exc.status == 409 and _is_already_resolved(exc.detail):
             # A double tap. Success, not an error.
@@ -433,8 +476,144 @@ async def _confirm(ctx, ch, api, args: list[str]) -> None:
         elif exc.status == 409:
             log("confirm_apply_failed", chat_id=ctx.log_ref, status=exc.status)
             await ch.send(ctx.chat_id, ch.S.confirm_failed(str(exc.detail or "")))
+        elif exc.status == 422:
+            # The platform won't approve this kind of change from a chat
+            # button (sending a report, D78), and its sentence says where it
+            # can be. Before this it read as "Something went wrong".
+            log("confirm_refused", chat_id=ctx.log_ref, status=exc.status)
+            detail = exc.detail if isinstance(exc.detail, str) else ""
+            await ch.send(ctx.chat_id, ch.S.confirm_failed(detail, refused=True))
         else:
             raise
+        return
+
+    if action != "approve":
+        await ch.send(ctx.chat_id, ch.S.REJECTED)
+        return
+    # What the approve did, in the order the web card shows it: APPROVED,
+    # the platform's sentence ("Added BULK ORION (#412)."), then any card
+    # text verbatim (a readiness list), then the files. An older platform
+    # sends none of these keys and the chat gets APPROVED alone, as before.
+    # The change is already made, so every message here, APPROVED included,
+    # is isolated and logged: one lost send never costs the rest, and none
+    # is reported as "Something went wrong".
+    chunks: list[str] = [ch.S.APPROVED]
+    if not isinstance(res, dict):
+        res = {}
+    reply = res.get("reply")
+    if isinstance(reply, str) and reply.strip():
+        chunks.extend(ch.format_markdown(reply.strip()))
+    for rendered in res.get("vessel_outputs") or []:
+        if isinstance(rendered, str) and rendered:
+            chunks.extend(ch.format_verbatim(rendered))
+    await _deliver(_SendProgress(ch, ctx), chunks)
+    sent = await _send_files(ctx, ch, api, res.get("files"), deadline=deadline)
+    log("confirm_done", chat_id=ctx.log_ref, chunks=len(chunks), files=sent)
+
+
+class _SendProgress(Progress):
+    """Plain sends with Progress's per-message isolation — for what follows
+    an approve, where there is no placeholder to edit."""
+
+    def __init__(self, ch: "Channel", ctx: Inbound):
+        super().__init__(ctx.chat_id, ctx.log_ref)
+        self._ch = ch
+
+    async def _send(self, chunk: str):
+        return await self._ch.send(self.chat_id, chunk)
+
+
+# --- report files -----------------------------------------------------------
+
+
+async def _send_files(ctx, ch, api, files: Any, *, deadline: float) -> int:
+    """Fetch and post each file a turn or an approve listed, in order (the
+    image first, then the PDF). Returns how many reached the chat.
+
+    `deadline` (time.monotonic()) is the chat's: no file is started with less
+    than _FILE_MIN_SECONDS left, and each fetch and each post is cut off at
+    it, so a slow file is a sentence rather than the function being killed.
+
+    Each file stands alone, like the confirm cards: one that can't be fetched
+    or posted gets a sentence and the next still goes. The platform's 404 and
+    410 sentences ("This file was removed …") are shown as they are; anything
+    else is FILE_SEND_FAILED, said once however many files fail. Names and
+    captions never reach the logs — only the kind and an outcome."""
+    if not isinstance(files, list):
+        return 0
+    sent = 0
+    told: set[str] = set()
+
+    async def tell(text: str) -> None:
+        if text in told:
+            return
+        told.add(text)
+        try:
+            await ch.send(ctx.chat_id, text)
+        except Exception as exc:  # noqa: BLE001
+            log_exception("file_notice_send_failed", exc, chat_id=ctx.log_ref)
+
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        try:
+            export_id = int(item["export_id"])
+        except (KeyError, TypeError, ValueError):
+            log("file_send_failed", chat_id=ctx.log_ref, kind=kind, outcome="bad_item")
+            continue
+        caption = item.get("caption") if isinstance(item.get("caption"), str) else None
+        if deadline - time.monotonic() < _FILE_MIN_SECONDS:
+            log("file_send_failed", chat_id=ctx.log_ref, kind=kind, outcome="out_of_time")
+            await tell(ch.S.FILE_SEND_FAILED)
+            continue
+        try:
+            data, mime, name = await asyncio.wait_for(
+                api.file(ctx.chat_id, export_id), deadline - time.monotonic())
+        except PlatformError as exc:
+            log("file_send_failed", chat_id=ctx.log_ref, kind=kind,
+                outcome="fetch", status=exc.status)
+            if exc.status in (404, 410) and isinstance(exc.detail, str) and exc.detail.strip():
+                await tell(ch.S.file_unavailable(exc.detail.strip()))
+            else:
+                await tell(ch.S.FILE_SEND_FAILED)
+            continue
+        except Exception as exc:  # noqa: BLE001
+            log_exception("file_send_failed", exc, chat_id=ctx.log_ref, kind=kind)
+            await tell(ch.S.FILE_SEND_FAILED)
+            continue
+
+        as_photo = kind == "png" and len(data) <= ch.PHOTO_MAX_BYTES
+        if kind == "png" and not as_photo and not ch.IMAGE_AS_DOCUMENT:
+            # WhatsApp caps an image at 5 MB and takes no image type as a
+            # document, so a bigger one can't be posted at all. Say so
+            # rather than make an upload Meta would refuse.
+            log("file_send_failed", chat_id=ctx.log_ref, kind=kind, outcome="too_big")
+            await tell(ch.S.IMAGE_TOO_BIG)
+            continue
+        fallback = "image/png" if kind == "png" else "application/pdf"
+        try:
+            if as_photo:
+                post = ch.send_photo(ctx.chat_id, data, filename=name, caption=caption,
+                                     mime=mime or fallback)
+            else:
+                # A PDF, or (where the channel takes one) an image too big
+                # to be a photo, which still arrives, as a file, at full
+                # quality.
+                post = ch.send_document(ctx.chat_id, data, filename=name, caption=caption,
+                                        mime=mime or fallback)
+            res = await asyncio.wait_for(post, max(0.0, deadline - time.monotonic()))
+        except Exception as exc:  # noqa: BLE001 — one lost file ≠ the rest
+            log_exception("file_send_failed", exc, chat_id=ctx.log_ref, kind=kind)
+            await tell(ch.S.FILE_SEND_FAILED)
+            continue
+        if res is False:
+            # The channel swallowed it (the chat blocked us) and logged why.
+            continue
+        sent += 1
+        log("file_sent", chat_id=ctx.log_ref, kind=kind,
+            outcome="photo" if as_photo else "document")
+    return sent
 
 
 # --- the turn ---------------------------------------------------------------
@@ -514,6 +693,7 @@ async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
         # Those are answers the user asked for — ship them, then the error.
         chunks.append(ch.S.agent_error(str(result["error"]).split(":")[0]))
         await _deliver(prog, chunks)
+        await _send_files(ctx, ch, api, result.get("files"), deadline=started + turn_timeout)
         return
 
     reply = (result.get("reply") or "").strip()
@@ -523,6 +703,11 @@ async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
         chunks = [ch.S.NO_ANSWER]
 
     await _deliver(prog, chunks)
+    # Report files (the image, then the PDF) go under the text that
+    # introduces them and above any approval card. An older platform sends
+    # no `files` key.
+    files_sent = await _send_files(ctx, ch, api, result.get("files"),
+                                   deadline=started + turn_timeout)
 
     for pending in result.get("pending") or []:
         try:
@@ -543,7 +728,7 @@ async def _turn(ctx, ch, api, *, turn_timeout: float) -> None:
             log_exception("agent_menu_send_failed", exc, chat_id=ctx.log_ref)
 
     log("turn_done", chat_id=ctx.log_ref, tools=result.get("tools_used"),
-        chunks=len(chunks), outcome=result.get("stop_reason"),
+        chunks=len(chunks), files=files_sent, outcome=result.get("stop_reason"),
         kind="file" if payload is not None else "text")
 
 

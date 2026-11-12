@@ -9,7 +9,8 @@ The structural differences from Telegram, all contained here:
   - Interactive body is capped at 1024 → the confirm card truncates at ~950,
     much harder than Telegram's 3500, with the same web-app pointer.
   - A file is a media id → a fresh short-lived URL → a Bearer download,
-    checked against the hash Meta gives for it.
+    checked against the hash Meta gives for it. Going out, it is the reverse:
+    upload to /media for an id, then an image or document message by id.
 """
 from __future__ import annotations
 
@@ -45,6 +46,11 @@ class WhatsAppProgress(Progress):
 
 class WhatsAppChannel:
     S = S
+    # The Cloud API's image limit. A bigger image is not sent: Meta caps
+    # image/png at 5 MB whatever message carries it, and no image type is on
+    # its list of document types, so an upload as a document would be refused.
+    PHOTO_MAX_BYTES = 5_000_000
+    IMAGE_AS_DOCUMENT = False
 
     def __init__(self, wa: WhatsAppClient, api: PlatformClient | None = None):
         self._wa = wa
@@ -86,6 +92,26 @@ class WhatsAppChannel:
 
     async def send(self, chat_id: str, text: str) -> bool:
         return await self._guard(chat_id, lambda: self._wa.send_text(chat_id, text))
+
+    async def send_photo(
+        self, chat_id: str, data: bytes, *, filename: str,
+        caption: str | None = None, mime: str = "image/png",
+    ) -> bool:
+        """Upload, then send by media id. Never by link: a link would make
+        Meta fetch the report from an unauthenticated URL."""
+        async def go():
+            media_id = await self._wa.upload_media(data, mime, filename)
+            await self._wa.send_image(chat_id, media_id, caption)
+        return await self._guard(chat_id, go)
+
+    async def send_document(
+        self, chat_id: str, data: bytes, *, filename: str,
+        caption: str | None = None, mime: str = "application/pdf",
+    ) -> bool:
+        async def go():
+            media_id = await self._wa.upload_media(data, mime, filename)
+            await self._wa.send_document(chat_id, media_id, filename, caption)
+        return await self._guard(chat_id, go)
 
     async def send_agent_picker(
         self, chat_id: str, agents: list[dict[str, Any]], page: int, title: str,

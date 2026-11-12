@@ -1,5 +1,6 @@
-"""A thin Telegram Bot API client — the ten methods this bot actually uses,
-plus the one file download that isn't a method."""
+"""A thin Telegram Bot API client — the methods this bot actually uses, plus
+the one file download that isn't a method. Two of them (sendPhoto,
+sendDocument) post multipart; everything else is JSON."""
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +10,33 @@ import httpx
 
 from ..core.attachments import read_capped
 from ..logging import log, log_exception
+
+
+CAPTION_LIMIT = 1024  # characters after entity parsing, counted in UTF-16
+
+
+def _clip_utf16(text: str, limit: int) -> str:
+    """Telegram counts text in UTF-16 code units, so an emoji is two."""
+    if len(text.encode("utf-16-le")) // 2 <= limit:
+        return text
+    out, used = [], 0
+    for ch in text:
+        units = 2 if ord(ch) > 0xFFFF else 1
+        if used + units > limit - 1:
+            break
+        out.append(ch)
+        used += units
+    return "".join(out) + "…"
+
+
+def _caption_fields(caption: Optional[str]) -> dict[str, Any]:
+    """A plain caption as HTML: clipped BEFORE escaping, so the limit holds
+    on what Telegram counts and an entity is never cut in half."""
+    if not caption:
+        return {}
+    from .html import esc
+
+    return {"caption": esc(_clip_utf16(caption, CAPTION_LIMIT)), "parse_mode": "HTML"}
 
 
 class TelegramError(RuntimeError):
@@ -28,9 +56,28 @@ class TelegramClient:
 
     async def _call(self, method: str, *, retries: int = 2, retry_transport: bool = True, **params) -> Any:
         payload = {k: v for k, v in params.items() if v is not None}
+        return await self._post(
+            lambda: self._http.post(f"{self._base}/{method}", json=payload),
+            retries=retries, retry_transport=retry_transport,
+        )
+
+    async def _upload(self, method: str, *, data: dict[str, Any], files: dict[str, Any],
+                      retries: int = 2) -> Any:
+        """A multipart method (sendPhoto, sendDocument). Transport errors and
+        5xx are never retried: either may come after Telegram already posted
+        the file, and a resend would put it in the chat twice — the same
+        no-resend contract message sends keep. A 429 is a definite refusal
+        and keeps its bounded wait-and-retry."""
+        form = {k: str(v) for k, v in data.items() if v is not None}
+        return await self._post(
+            lambda: self._http.post(f"{self._base}/{method}", data=form, files=files),
+            retries=retries, retry_transport=False,
+        )
+
+    async def _post(self, send, *, retries: int, retry_transport: bool) -> Any:
         for attempt in range(retries + 1):
             try:
-                r = await self._http.post(f"{self._base}/{method}", json=payload)
+                r = await send()
                 body = r.json()
             except Exception as exc:  # transport
                 if attempt == retries or not retry_transport:
@@ -101,6 +148,32 @@ class TelegramClient:
             return await self.send_message(
                 chat_id, strip_tags(html), parse_mode=None, reply_markup=reply_markup, retries=retries,
             )
+
+    async def send_photo(
+        self, chat_id: str | int, data: bytes, *, filename: str,
+        caption: Optional[str] = None, mime: str = "image/png",
+    ) -> int:
+        """Post an image as a photo (Telegram's limit: 10 MB). `caption` is
+        plain text; it is clipped to 1024 and escaped for HTML here."""
+        res = await self._upload(
+            "sendPhoto",
+            data={"chat_id": chat_id, **_caption_fields(caption)},
+            files={"photo": (filename, data, mime)},
+        )
+        return res["message_id"]
+
+    async def send_document(
+        self, chat_id: str | int, data: bytes, *, filename: str,
+        caption: Optional[str] = None, mime: str = "application/pdf",
+    ) -> int:
+        """Post a file as a document (Telegram's limit: 50 MB), under its
+        own name. `caption` is plain text, clipped and escaped as above."""
+        res = await self._upload(
+            "sendDocument",
+            data={"chat_id": chat_id, **_caption_fields(caption)},
+            files={"document": (filename, data, mime)},
+        )
+        return res["message_id"]
 
     async def edit_message_text(
         self,

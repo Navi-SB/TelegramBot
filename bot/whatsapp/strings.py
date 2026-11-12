@@ -135,6 +135,33 @@ REJECTED = "❌ Change rejected."
 
 ALREADY_RESOLVED = "Already resolved."
 
+# An approve the platform got but didn't answer in time (the Telegram module
+# says why this isn't PLATFORM_DOWN).
+CONFIRM_NO_ANSWER = (
+    "⏳ Tropis didn't answer in time, so the change may or may not have been "
+    "made. Tap *Approve* again to check: it says \"Already resolved\" if it "
+    "went through. To get the report's files, ask me to show the report."
+)
+
+# A report image over WhatsApp's 5 MB image limit, which WhatsApp won't
+# take as a file either.
+IMAGE_TOO_BIG = (
+    "⚠️ The report image is too big to send on WhatsApp; open it on the "
+    "Reports page at tropishq.com/reports."
+)
+
+# A report image or PDF that was made but couldn't be fetched or posted here.
+FILE_SEND_FAILED = (
+    "⚠️ The file could not be sent here; open it on the Reports page at "
+    "tropishq.com/reports."
+)
+
+
+def file_unavailable(detail: str) -> str:
+    """The platform's own sentence for a file it no longer has ("This file
+    was removed after 30 days; export again.") — plain words, safe to show."""
+    return f"⚠️ {detail[:300]}"
+
 
 def linked(name: str, account: str | None) -> str:
     # The email, or "Acme Shipping (ops1)" for a company login (the Telegram
@@ -223,9 +250,13 @@ def no_agent_match(query: str, agents_of: str | None = None) -> str:
     return f"No agent matches *{query}*{where}. Send *agents* to see the list."
 
 
-def confirm_failed(detail: str) -> str:
+def confirm_failed(detail: str, *, refused: bool = False) -> str:
     # The 409 detail is a server-authored sentence about the user's own data
     # ("Vessel 'X' not found.") — safe to show, and actionable.
+    if refused:
+        # A 422 (the Telegram module says why this reads differently).
+        return "⚠️ That change wasn't applied here. It's still pending." + (
+            f"\n{detail[:200]}" if detail else "")
     tail = f"\n`{detail[:200]}`" if detail else ""
     return (
         "⚠️ That change couldn't be applied — the data may have changed "

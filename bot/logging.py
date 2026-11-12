@@ -26,6 +26,8 @@ _ALLOWED = {
     # A 429's wait in seconds: it is what tells a chat sending files faster
     # than 6 a minute from an account at its daily ceiling.
     "retry_after",
+    # How many report files a turn or an approve delivered — a count only.
+    "files",
 }
 
 _logger = logging.getLogger("tropis.bot")

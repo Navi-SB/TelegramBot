@@ -27,12 +27,31 @@ class FakeTg:
         self.edits: list[tuple[int, str]] = []
         self.keyboards: list[dict] = []
         self.answered: list[str] = []
+        # Report files posted: (method, filename, caption, size, mime).
+        self.files: list[tuple[str, str, str | None, int, str]] = []
+        # Everything that reached the chat, in order: ("text", t),
+        # ("card", t) for a send with buttons, ("photo"|"document", name).
+        self.order: list[tuple[str, str]] = []
         self._next_id = 100
 
     async def send_safe(self, chat_id, text, *, reply_markup=None):
         self.sent.append((str(chat_id), text))
+        self.order.append(("card" if reply_markup else "text", text))
         if reply_markup:
             self.keyboards.append(reply_markup)
+        self._next_id += 1
+        return self._next_id
+
+    async def send_photo(self, chat_id, data, *, filename, caption=None, mime="image/png"):
+        self.files.append(("photo", filename, caption, len(data), mime))
+        self.order.append(("photo", filename))
+        self._next_id += 1
+        return self._next_id
+
+    async def send_document(self, chat_id, data, *, filename, caption=None,
+                            mime="application/pdf"):
+        self.files.append(("document", filename, caption, len(data), mime))
+        self.order.append(("document", filename))
         self._next_id += 1
         return self._next_id
 
@@ -41,6 +60,7 @@ class FakeTg:
 
     async def edit_message_text(self, chat_id, message_id, text, **kw):
         self.edits.append((message_id, text))
+        self.order.append(("text", text))
 
     async def edit_reply_markup(self, *a, **kw):
         pass
@@ -56,9 +76,30 @@ class FakeTg:
         return "\n".join(t for _, t in self.sent) + "\n".join(t for _, t in self.edits)
 
 
+PNG = b"\x89PNG\r\n\x1a\n" + b"p" * 2000
+PDF = b"%PDF-1.7\n" + b"d" * 500
+# What /api/bot/files serves for each export id: (bytes, mime, filename), or
+# the PlatformError it answers with.
+FILES = {7: (PNG, "image/png", "Weekly Period Rundown 2026-11-10.png"),
+         6: (PDF, "application/pdf", "Weekly Period Rundown 2026-11-10.pdf")}
+CAPTION = "Weekly Period Rundown · 2026-11-10 · image, PDF"
+
+
+def file_items(*ids, caption=CAPTION):
+    """The `files` list exactly as the wire contract shapes it: the caption on
+    the first item only, no file name anywhere."""
+    out = []
+    for i, export_id in enumerate(ids):
+        data, mime, _ = FILES.get(export_id, (b"", "image/png", ""))
+        out.append({"export_id": export_id, "kind": "pdf" if mime == "application/pdf" else "png",
+                    "mime": mime, "byte_count": len(data), "current": True,
+                    "caption": caption if i == 0 else None})
+    return out
+
+
 class FakeApi:
     def __init__(self, *, linked=True, agents=None, turn=None, fail=None, account=None,
-                 user=None, active_gone=None):
+                 user=None, active_gone=None, confirm_result=None, files=None):
         self._linked = linked
         # The platform's "whose agents are these" label; None is a platform
         # that predates it, which sends no key at all.
@@ -74,6 +115,10 @@ class FakeApi:
         self.revoked = False
         self.selected = None
         self.turns: list[tuple[str, dict | None]] = []  # (content, attachment)
+        # What /confirm answers; the default is an old platform's approve.
+        self._confirm_result = confirm_result
+        self._files = FILES if files is None else files
+        self.file_calls: list[int] = []
 
     async def get_link(self, chat_id):
         self.calls.append("get_link")
@@ -112,11 +157,25 @@ class FakeApi:
             raise PlatformUnavailable(0, "ReadTimeout")
         return self._turn
 
-    async def confirm(self, chat_id, pending_id, action):
+    async def confirm(self, chat_id, pending_id, action, *, timeout=None):
         self.calls.append(f"confirm:{action}")
         if self._fail == "already":
             raise PlatformError(409, "already applied")
-        return {"status": "applied"}
+        if action == "reject":
+            return {"status": "rejected"}
+        if isinstance(self._confirm_result, Exception):
+            raise self._confirm_result
+        return self._confirm_result or {"status": "applied"}
+
+    async def file(self, chat_id, export_id):
+        self.calls.append("file")
+        self.file_calls.append(export_id)
+        got = self._files.get(export_id)
+        if got is None:
+            raise PlatformError(404, "That export is not on this desk.")
+        if isinstance(got, Exception):
+            raise got
+        return got
 
     async def revoke(self, chat_id):
         self.revoked = True
@@ -923,3 +982,285 @@ def test_the_cap_is_the_number_voyagecalc_allows():
 
 def test_help_says_files_can_be_sent_with_a_caption():
     assert "PDF or Word file" in S.HELP and "caption" in S.HELP
+
+
+# ---------------------------------------------------------------------------
+# report files and what an approve did (NAV-TBD-82)
+# ---------------------------------------------------------------------------
+def kinds(tg):
+    return [k for k, _ in tg.order]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_with_files_sends_the_text_then_the_image_then_the_pdf_then_cards():
+    api = FakeApi(turn={"reply": "Here is this week's rundown.", "vessel_outputs": [],
+                        "tools_used": ["show_period_report"], "stop_reason": "end_turn",
+                        "error": None, "files": file_items(7, 6),
+                        "pending": [{"pending_id": "p1", "tool": "add_cargo",
+                                     "diff": {"summary": "Add 1 cargo"}}]})
+    tg = await run(msg("show me the report"), api)
+    # placeholder, answer (an edit), photo, document, the approval card
+    assert kinds(tg) == ["text", "text", "photo", "document", "card"]
+    assert "this week's rundown" in tg.order[1][1]
+    assert api.file_calls == [7, 6]
+    photo, document = tg.files
+    assert photo[:3] == ("photo", "Weekly Period Rundown 2026-11-10.png", CAPTION)
+    assert document[:3] == ("document", "Weekly Period Rundown 2026-11-10.pdf", None)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_from_an_old_platform_fetches_no_files():
+    api = FakeApi()  # no `files` key at all
+    tg = await run(msg("hello"), api)
+    assert api.file_calls == [] and tg.files == []
+
+
+@pytest.mark.asyncio
+async def test_files_shown_before_a_late_error_still_ship():
+    api = FakeApi(turn={"reply": "", "vessel_outputs": ["READY"], "pending": [],
+                        "tools_used": [], "stop_reason": "error",
+                        "error": "RuntimeError: boom", "files": file_items(7)})
+    tg = await run(msg("show the report"), api)
+    assert [f[0] for f in tg.files] == ["photo"]
+    assert "RuntimeError" in tg.all_text
+
+
+APPROVED_EXPORT = {
+    "status": "applied", "tool_name": "export_period_report", "after": {"rev": 3},
+    "reply": "Exported the Period Rundown as an image and a PDF.",
+    "vessel_outputs": ["✓ Market notes\n● Positions: 2 to check"],
+    "files": file_items(7, 6),
+}
+
+
+@pytest.mark.asyncio
+async def test_an_approve_shows_what_it_did_then_the_files_in_order():
+    api = FakeApi(confirm_result=APPROVED_EXPORT)
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    assert kinds(tg) == ["text", "text", "text", "photo", "document"]
+    texts = [t for k, t in tg.order if k == "text"]
+    assert texts[0] == S.APPROVED
+    assert "Exported the Period Rundown" in texts[1]
+    # the readiness block goes verbatim, as card text does in a turn
+    assert texts[2].startswith("<pre>") and "Positions: 2 to check" in texts[2]
+    assert tg.files[0][2] == CAPTION
+
+
+@pytest.mark.asyncio
+async def test_an_approve_from_an_old_platform_says_approved_and_nothing_else():
+    api = FakeApi()  # {"status": "applied"} only
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    assert [t for _, t in tg.sent] == [S.APPROVED]
+    assert api.file_calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_approve_shows_the_appliers_own_sentence():
+    api = FakeApi(confirm_result={"status": "applied", "tool_name": "add_cargo",
+                                  "after": {}, "reply": "Added BULK ORION (#412).",
+                                  "vessel_outputs": [], "files": []})
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    assert [t for _, t in tg.sent] == [S.APPROVED, "Added BULK ORION (#412)."]
+
+
+@pytest.mark.asyncio
+async def test_a_reject_says_rejected_only():
+    api = FakeApi(confirm_result=APPROVED_EXPORT)
+    tg = await run(cb(encode("w", "n", "p1")), api)
+    assert [t for _, t in tg.sent] == [S.REJECTED]
+    assert api.file_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_approve_says_where_to_approve_it_instead_of_something_went_wrong():
+    detail = "Approve this on the Reports page or in a web or mobile chat."
+    api = FakeApi(confirm_result=PlatformError(422, detail))
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    assert S.UNEXPECTED not in tg.all_text
+    assert tg.sent == [("1", S.confirm_failed(detail, refused=True))]
+    assert detail in tg.all_text and "still pending" in tg.all_text
+    # a refusal is not "the data changed underneath it"
+    assert "underneath" not in tg.all_text
+
+
+@pytest.mark.asyncio
+async def test_a_removed_file_says_the_platforms_sentence_and_the_next_still_goes():
+    removed = "This file was removed after 30 days; export again."
+    api = FakeApi(confirm_result=APPROVED_EXPORT,
+                  files={7: PlatformError(410, removed), 6: FILES[6]})
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    assert S.file_unavailable(removed) in [t for _, t in tg.sent]
+    assert [f[0] for f in tg.files] == ["document"]
+
+
+@pytest.mark.asyncio
+async def test_a_file_not_on_this_desk_says_so():
+    api = FakeApi(confirm_result=APPROVED_EXPORT, files={})
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    notices = [t for _, t in tg.sent if "not on this desk" in t]
+    assert len(notices) == 1  # said once, though both files failed the same way
+
+
+@pytest.mark.asyncio
+async def test_a_png_too_big_for_a_photo_goes_as_a_document():
+    big = b"\x89PNG" + b"p" * 10_000_001
+    api = FakeApi(confirm_result={**APPROVED_EXPORT, "files": file_items(7)},
+                  files={7: (big, "image/png", "Rundown.png")})
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    assert [(f[0], f[4]) for f in tg.files] == [("document", "image/png")]
+    assert tg.files[0][2] == CAPTION  # the caption travels with it
+
+
+@pytest.mark.asyncio
+async def test_one_file_that_fails_to_post_does_not_stop_the_next(caplog):
+    class FlakyTg(FakeTg):
+        async def send_photo(self, *a, **kw):
+            raise TelegramError(500, "Internal Server Error")
+
+    api = FakeApi(confirm_result=APPROVED_EXPORT)
+    with caplog.at_level(logging.INFO, logger="tropis.bot"):
+        tg = await run(cb(encode("w", "y", "p1")), api, FlakyTg())
+    assert [f[0] for f in tg.files] == ["document"]
+    assert S.FILE_SEND_FAILED in [t for _, t in tg.sent]
+    assert S.UNEXPECTED not in tg.all_text
+    # never a file name or caption in the logs
+    assert "Weekly Period Rundown" not in caplog.text
+    assert "file_send_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_platform_while_fetching_files_says_so_once():
+    down = PlatformUnavailable(0, "ConnectError")
+    api = FakeApi(confirm_result=APPROVED_EXPORT, files={7: down, 6: down})
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    assert [t for _, t in tg.sent].count(S.FILE_SEND_FAILED) == 1
+    assert S.PLATFORM_DOWN not in tg.all_text  # the approve itself went through
+
+
+@pytest.mark.asyncio
+async def test_a_lost_reply_after_an_approve_is_not_reported_as_a_failure():
+    class DropsSecond(FakeTg):
+        async def send_safe(self, chat_id, text, *, reply_markup=None):
+            if text != S.APPROVED:
+                raise TelegramError(400, "Bad Request: chat not found")
+            return await super().send_safe(chat_id, text, reply_markup=reply_markup)
+
+    api = FakeApi(confirm_result=APPROVED_EXPORT)
+    tg = await run(cb(encode("w", "y", "p1")), api, DropsSecond())
+    assert S.UNEXPECTED not in tg.all_text
+    assert [f[0] for f in tg.files] == ["photo", "document"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_approved_message_still_lets_the_reply_and_files_through():
+    """The change is made before APPROVED is sent. One transport error or
+    5xx on it (send_message never retries those) used to escape _confirm:
+    the chat got "Something went wrong" about an applied change, and the
+    reply and the report's files, made only at /confirm, never came."""
+    class DropsApproved(FakeTg):
+        async def send_safe(self, chat_id, text, *, reply_markup=None):
+            if text == S.APPROVED:
+                raise TelegramError(502, "Bad Gateway")
+            return await super().send_safe(chat_id, text, reply_markup=reply_markup)
+
+    api = FakeApi(confirm_result=APPROVED_EXPORT)
+    tg = await run(cb(encode("w", "y", "p1")), api, DropsApproved())
+    assert S.UNEXPECTED not in tg.all_text
+    assert any("Exported the Period Rundown" in t for _, t in tg.sent)
+    assert [f[0] for f in tg.files] == ["photo", "document"]
+
+
+class _Clock:
+    """Stands in for the dispatcher's clock only (asyncio keeps the real
+    one), so a test can say how much of the deadline is left."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+@pytest.mark.asyncio
+async def test_the_confirm_wait_is_capped_by_the_chats_deadline():
+    from bot.platform.client import CONFIRM_TIMEOUT
+
+    waits = []
+
+    class Timed(FakeApi):
+        async def confirm(self, chat_id, pending_id, action, *, timeout=None):
+            waits.append(timeout)
+            return await super().confirm(chat_id, pending_id, action, timeout=timeout)
+
+    await handle_update(cb(encode("w", "y", "p1")), FakeTg(), Timed(), turn_timeout=265)
+    await handle_update(cb(encode("w", "y", "p1")), FakeTg(), Timed(), turn_timeout=30)
+    await handle_update(cb(encode("w", "y", "p1")), FakeTg(), Timed(), turn_timeout=3)
+    assert waits == [CONFIRM_TIMEOUT, 20.0, 5.0]
+
+
+@pytest.mark.asyncio
+async def test_files_are_not_started_when_the_deadline_is_too_close(monkeypatch, caplog):
+    from bot.core import dispatch
+
+    clock = _Clock()
+    monkeypatch.setattr(dispatch, "time", clock)
+
+    class SlowConfirm(FakeApi):
+        async def confirm(self, *a, **kw):
+            clock.now += 27  # of 30: 3 s left, under _FILE_MIN_SECONDS
+            return await super().confirm(*a, **kw)
+
+    api = SlowConfirm(confirm_result=APPROVED_EXPORT)
+    with caplog.at_level(logging.INFO, logger="tropis.bot"):
+        tg = await run(cb(encode("w", "y", "p1")), api)
+    assert api.file_calls == [] and tg.files == []
+    assert [t for _, t in tg.sent].count(S.FILE_SEND_FAILED) == 1
+    assert S.APPROVED in [t for _, t in tg.sent]
+    assert '"outcome": "out_of_time"' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_file_post_that_hangs_is_cut_off_at_the_deadline(monkeypatch):
+    from bot.core import dispatch
+
+    clock = _Clock()
+    monkeypatch.setattr(dispatch, "time", clock)
+
+    class SlowFile(FakeApi):
+        async def file(self, chat_id, export_id):
+            clock.now += 29.95  # of 30: 0.05 s left for the post
+            return await super().file(chat_id, export_id)
+
+    class Hangs(FakeTg):
+        async def send_photo(self, *a, **kw):
+            await asyncio.Event().wait()
+
+    api = SlowFile(confirm_result={**APPROVED_EXPORT, "files": file_items(7)})
+    tg = await asyncio.wait_for(run(cb(encode("w", "y", "p1")), api, Hangs()), 5)
+    assert S.FILE_SEND_FAILED in [t for _, t in tg.sent]
+    assert S.UNEXPECTED not in tg.all_text
+
+
+@pytest.mark.asyncio
+async def test_a_slow_approve_says_it_may_have_gone_through():
+    api = FakeApi(confirm_result=PlatformUnavailable(0, "ReadTimeout"))
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    assert [t for _, t in tg.sent] == [S.CONFIRM_NO_ANSWER]
+    assert S.PLATFORM_DOWN not in tg.all_text
+
+
+@pytest.mark.asyncio
+async def test_an_approve_that_never_reached_the_platform_says_it_was_not_processed():
+    api = FakeApi(confirm_result=PlatformUnavailable(0, "ConnectError"))
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    assert [t for _, t in tg.sent] == [S.PLATFORM_DOWN]
+
+
+def test_the_file_messages_name_the_reports_page_in_plain_words():
+    from bot.whatsapp import strings as WS
+
+    for mod in (S, WS):
+        assert "Reports page" in mod.FILE_SEND_FAILED
+        assert mod.file_unavailable("This file was removed; export again.").endswith(
+            "This file was removed; export again.")
+    assert S.file_unavailable("a < b") == "⚠️ a &lt; b"

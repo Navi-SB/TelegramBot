@@ -11,6 +11,7 @@ from typing import Any, Optional
 from .. import strings as S
 from ..core.attachments import Attachment, AttachmentTooLarge, AttachmentUnavailable
 from ..core.dispatch import Inbound, Progress, diff_lines
+from ..logging import log
 from .api import TelegramError
 from .html import esc, md_to_html, split_html
 from .keyboards import agent_picker, confirm_unlink, confirm_write
@@ -99,6 +100,9 @@ class TelegramProgress(Progress):
 
 class TelegramChannel:
     S = S
+    # sendPhoto's limit; a bigger image goes as a document (50 MB) instead.
+    PHOTO_MAX_BYTES = 10_000_000
+    IMAGE_AS_DOCUMENT = True
 
     def __init__(self, tg):
         self._tg = tg
@@ -114,6 +118,28 @@ class TelegramChannel:
 
     async def send(self, chat_id: str, text: str) -> None:
         await self._tg.send_safe(chat_id, text)
+
+    async def send_photo(
+        self, chat_id: str, data: bytes, *, filename: str,
+        caption: Optional[str] = None, mime: str = "image/png",
+    ) -> None:
+        try:
+            await self._tg.send_photo(chat_id, data, filename=filename, caption=caption, mime=mime)
+        except TelegramError as exc:
+            # A 400 is a definite refusal (nothing was posted) — typically an
+            # image too tall for a photo (width + height over 10000). The
+            # same file still goes through as a document, at full quality.
+            if exc.code != 400:
+                raise
+            log("photo_refused_sent_as_document", chat_id=chat_id, status=exc.code)
+            await self._tg.send_document(chat_id, data, filename=filename, caption=caption,
+                                         mime=mime)
+
+    async def send_document(
+        self, chat_id: str, data: bytes, *, filename: str,
+        caption: Optional[str] = None, mime: str = "application/pdf",
+    ) -> None:
+        await self._tg.send_document(chat_id, data, filename=filename, caption=caption, mime=mime)
 
     async def send_agent_picker(
         self, chat_id: str, agents: list[dict[str, Any]], page: int, title: str,

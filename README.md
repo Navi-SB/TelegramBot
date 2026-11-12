@@ -253,6 +253,94 @@ The rules, all in `bot/core/`:
 
 ---
 
+## Report files and approvals
+
+When the agent shows or exports the Period Rundown, the chat gets the image
+(as a photo) and the PDF (as a document) under the text, above any approval
+card. Approving a change now says what it did, in the order the web card
+shows it.
+
+Both `/api/bot/turn` and an approve from `/api/bot/confirm` may carry:
+
+```json
+"files": [{"export_id": 7, "kind": "png", "mime": "image/png", "byte_count": 733240,
+           "current": true, "caption": "Weekly Period Rundown · 2026-11-10 · image, PDF"},
+          {"export_id": 6, "kind": "pdf", "mime": "application/pdf", "byte_count": 14719,
+           "current": true, "caption": null}]
+```
+
+An approve also carries `reply` (the change's own sentence, "Added BULK ORION
+(#412).") and `vessel_outputs` (card text such as the readiness list). The
+chat gets ✅ Change approved, then `reply`, then each output verbatim, then
+the files. A reject is still `{"status": "rejected"}`. Every key is optional:
+an older backend sends none of them and the chat sees what it always did.
+
+The bytes are fetched one file at a time from
+`POST /api/bot/files` `{channel, chat_id, export_id}` (service token; the
+chat's link decides which desk's exports it may read; POST so a WhatsApp
+number stays out of access logs). The file name comes only from that
+response's `Content-Disposition` (`filename*` first, then `filename`, else
+"Period Rundown.png/.pdf"); it never appears in the JSON. Reading stops at
+20 MB.
+
+| | Telegram | WhatsApp |
+|---|---|---|
+| Image | multipart `sendPhoto`; over 10 MB, or refused with a 400 (too tall), as `sendDocument` | upload to `/{phone_number_id}/media`, then an `image` message by media id; over 5 MB not sent (Meta caps `image/png` at 5 MB and takes no image type as a document) |
+| PDF | multipart `sendDocument` | upload, then a `document` message with its file name |
+| Caption | first file only, clipped to 1024, HTML-escaped | first file only, clipped to 1024 |
+| Resend | never after a transport error or 5xx (it may have landed) | the send ladder; never by link (Meta would fetch an unauthenticated URL) |
+
+What the chat is told when something goes wrong:
+
+- **A file the platform no longer has** (404 "That export is not on this
+  desk.", 410 "This file was removed …"): the platform's sentence, as is.
+- **An image over 5 MB on WhatsApp**: "The report image is too big to send
+  on WhatsApp; open it on the Reports page." The PDF still goes.
+- **Anything else** (platform down, upload or send refused, out of time):
+  "The file could not be sent here; open it on the Reports page." — once,
+  however many files failed. Each file stands alone; one failure never
+  stops the next.
+- **An approve that got no answer in time**: "Tropis didn't answer in time,
+  so the change may or may not have been made. Tap Approve again to
+  check …", not "your message wasn't processed", which could be false. A
+  confirm that never reached the platform still says the platform is down.
+- **An approve the platform refuses (422)**, e.g. sending a report, which is
+  approved only on the web (D78): "That change wasn't applied here. It's
+  still pending." with the platform's sentence saying where to approve it.
+  Before, this read as "Something went wrong".
+
+`/confirm` waits up to 90 s (`CONFIRM_TIMEOUT`), because an export's approve
+renders the report before it answers — but never past the chat's own
+deadline less 10 s for the messages after it. On WhatsApp that deadline is
+what is left of the batch's 290 s function, so an Approve late in a batch
+waits less rather than being killed after the change was made. The files
+share that deadline: none is started with under 5 s left, and each fetch
+and post is cut off at it. "✅ Change approved." is isolated like the
+messages after it, so losing it costs nothing else. If the approve's
+answer is lost, tapping again says "Already resolved" and the files don't
+come; asking the agent to show the report sends them again. Logs carry the
+kind and an outcome per file (`file_sent`, `file_send_failed` with
+`out_of_time` / `too_big` / `fetch`), never a name or caption.
+
+**Deploy this bridge first, then VoyageCalc** — the opposite of sent files
+above. The backend change is not only new keys: it lets the bot model use
+`export_period_report` and `show_period_report`, tells it the image and PDF
+reach the chat, and lets an export be approved from a chat instead of
+refusing it. An old bridge on that backend reads none of `reply`, `files`
+or `vessel_outputs` on an approve and never fetches a file, so a broker who
+approves an export gets "Change approved." and no report, after being told
+it was coming (before, the same tap said to approve it on the web). Its
+fixed 30 s confirm can also call a slow render "platform down" after the
+change was made. VoyageCalc auto-deploys on push to `main`, so the bridge's
+production deploy has to be live before that push.
+
+The other way round is safe: this bridge on an old backend never sees the
+two tools, shows the old export refusal as "That change wasn't applied
+here …" with its sentence, gets no `files` key on a turn and fetches
+nothing, and on an approve without `reply` says "Change approved." alone.
+
+---
+
 ## Things that will bite you
 
 **Use a separate `@..._dev_bot` for Preview and Development.** `setWebhook` is
