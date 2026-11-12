@@ -102,6 +102,7 @@ class TelegramChannel:
     S = S
     # sendPhoto's limit; a bigger image goes as a document (50 MB) instead.
     PHOTO_MAX_BYTES = 10_000_000
+    IMAGE_AS_DOCUMENT = True
 
     def __init__(self, tg):
         self._tg = tg

@@ -154,8 +154,10 @@ class Channel(Protocol):
 
     S: Any  # the channel's strings module
     # The biggest image the channel takes as a photo; a bigger one goes as a
-    # document instead.
+    # document instead where IMAGE_AS_DOCUMENT, and is otherwise not sent
+    # (the chat gets S.IMAGE_TOO_BIG).
     PHOTO_MAX_BYTES: int
+    IMAGE_AS_DOCUMENT: bool
 
     async def ack(self, ctx: Inbound) -> None: ...
     async def send(self, chat_id: str, text: str) -> None: ...
@@ -582,14 +584,22 @@ async def _send_files(ctx, ch, api, files: Any, *, deadline: float) -> int:
             continue
 
         as_photo = kind == "png" and len(data) <= ch.PHOTO_MAX_BYTES
+        if kind == "png" and not as_photo and not ch.IMAGE_AS_DOCUMENT:
+            # WhatsApp caps an image at 5 MB and takes no image type as a
+            # document, so a bigger one can't be posted at all. Say so
+            # rather than make an upload Meta would refuse.
+            log("file_send_failed", chat_id=ctx.log_ref, kind=kind, outcome="too_big")
+            await tell(ch.S.IMAGE_TOO_BIG)
+            continue
         fallback = "image/png" if kind == "png" else "application/pdf"
         try:
             if as_photo:
                 post = ch.send_photo(ctx.chat_id, data, filename=name, caption=caption,
                                      mime=mime or fallback)
             else:
-                # A PDF, or an image too big to be a photo — which still
-                # arrives, as a file, at full quality.
+                # A PDF, or (where the channel takes one) an image too big
+                # to be a photo, which still arrives, as a file, at full
+                # quality.
                 post = ch.send_document(ctx.chat_id, data, filename=name, caption=caption,
                                         mime=mime or fallback)
             res = await asyncio.wait_for(post, max(0.0, deadline - time.monotonic()))

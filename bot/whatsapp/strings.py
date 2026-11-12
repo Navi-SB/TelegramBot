@@ -143,6 +143,13 @@ CONFIRM_NO_ANSWER = (
     "went through. To get the report's files, ask me to show the report."
 )
 
+# A report image over WhatsApp's 5 MB image limit, which WhatsApp won't
+# take as a file either.
+IMAGE_TOO_BIG = (
+    "⚠️ The report image is too big to send on WhatsApp; open it on the "
+    "Reports page at tropishq.com/reports."
+)
+
 # A report image or PDF that was made but couldn't be fetched or posted here.
 FILE_SEND_FAILED = (
     "⚠️ The file could not be sent here; open it on the Reports page at "

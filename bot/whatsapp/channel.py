@@ -46,8 +46,11 @@ class WhatsAppProgress(Progress):
 
 class WhatsAppChannel:
     S = S
-    # The Cloud API's image limit; a bigger image goes as a document (100 MB).
+    # The Cloud API's image limit. A bigger image is not sent: Meta caps
+    # image/png at 5 MB whatever message carries it, and no image type is on
+    # its list of document types, so an upload as a document would be refused.
     PHOTO_MAX_BYTES = 5_000_000
+    IMAGE_AS_DOCUMENT = False
 
     def __init__(self, wa: WhatsAppClient, api: PlatformClient | None = None):
         self._wa = wa

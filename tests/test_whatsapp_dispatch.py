@@ -786,14 +786,30 @@ async def test_a_refused_approve_is_readable():
 
 
 @pytest.mark.asyncio
-async def test_a_png_too_big_for_a_whatsapp_image_goes_as_a_document():
-    """WhatsApp takes images up to 5 MB, half of Telegram's photo limit."""
+async def test_a_png_too_big_for_a_whatsapp_image_is_not_uploaded_and_the_pdf_still_goes(caplog):
+    """WhatsApp caps image/png at 5 MB whatever message carries it, and no
+    image type is a WhatsApp document type, so a bigger image can't be sent
+    as a document the way Telegram sends one. It is not uploaded at all; the
+    chat is told where to open it, and the PDF still arrives."""
     big = b"\x89PNG" + b"p" * 6_000_000
+    api = FakeApi(turn=turn_result(reply="Here.", files=file_items(7, 6)),
+                  files={7: (big, "image/png", "Rundown.png"), 6: FILES[6]})
+    with caplog.at_level(logging.INFO, logger="tropis.bot"):
+        wa = await run(text_msg("show the report"), api)
+    assert [u[0] for u in wa.uploads] == ["application/pdf"]  # never image/png
+    assert [m[0] for m in wa.media] == ["document"]
+    assert S.IMAGE_TOO_BIG in [b for _, b in wa.texts]
+    assert "Reports page" in S.IMAGE_TOO_BIG
+    assert '"outcome": "too_big"' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_png_at_the_whatsapp_image_limit_still_goes_as_an_image():
+    edge = b"\x89PNG" + b"p" * (WhatsAppChannel.PHOTO_MAX_BYTES - 4)
     api = FakeApi(turn=turn_result(reply="Here.", files=file_items(7)),
-                  files={7: (big, "image/png", "Rundown.png")})
+                  files={7: (edge, "image/png", "Rundown.png")})
     wa = await run(text_msg("show the report"), api)
-    assert wa.media == [("document", "media1", "Rundown.png", CAPTION)]
-    assert wa.uploads[0][0] == "image/png"
+    assert [m[0] for m in wa.media] == ["image"]
 
 
 @pytest.mark.asyncio
