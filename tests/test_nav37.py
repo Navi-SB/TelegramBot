@@ -229,7 +229,7 @@ class Api409(FakeApi):
         super().__init__()
         self._detail = detail
 
-    async def confirm(self, chat_id, pending_id, action):
+    async def confirm(self, chat_id, pending_id, action, *, timeout=None):
         raise PlatformError(409, self._detail)
 
 

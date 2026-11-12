@@ -134,14 +134,21 @@ class PlatformClient:
             body["attachment"] = attachment
         return await self._call("POST", "/api/bot/turn", json=body, timeout=timeout)
 
-    async def confirm(self, chat_id: str, pending_id: str, action: str) -> dict[str, Any]:
+    async def confirm(
+        self, chat_id: str, pending_id: str, action: str, *,
+        timeout: float = CONFIRM_TIMEOUT,
+    ) -> dict[str, Any]:
         """Approve or reject. An approve answers {status, tool_name, after}
         and, from a backend that knows them, `reply`, `vessel_outputs` and
-        `files` saying what the change did. An older one sends none of them."""
+        `files` saying what the change did. An older one sends none of them.
+
+        `timeout` is never more than CONFIRM_TIMEOUT; the dispatcher passes
+        less when the chat's deadline (a WhatsApp batch's remaining budget)
+        is nearer than that."""
         return await self._call("POST", "/api/bot/confirm", json={
             "channel": self._channel, "chat_id": chat_id,
             "pending_id": pending_id, "action": action,
-        }, timeout=CONFIRM_TIMEOUT)
+        }, timeout=min(CONFIRM_TIMEOUT, timeout))
 
     # --- report files -------------------------------------------------------
 

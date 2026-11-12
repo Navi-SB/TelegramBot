@@ -403,7 +403,7 @@ async def test_a_double_tapped_approve_reads_409_as_success():
 @pytest.mark.asyncio
 async def test_a_real_apply_failure_surfaces_instead_of_fake_success():
     class Api(FakeApi):
-        async def confirm(self, chat_id, pending_id, action):
+        async def confirm(self, chat_id, pending_id, action, *, timeout=None):
             raise PlatformError(409, "Vessel 'MV GHOST' not found.")
 
     wa = await run(interactive("button_reply", encode("w", "y", "p1")), Api())
@@ -794,6 +794,37 @@ async def test_a_png_too_big_for_a_whatsapp_image_goes_as_a_document():
     wa = await run(text_msg("show the report"), api)
     assert wa.media == [("document", "media1", "Rundown.png", CAPTION)]
     assert wa.uploads[0][0] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_an_approve_late_in_a_batch_waits_no_longer_than_the_batch_has_left():
+    """A WhatsApp batch's later envelopes get only what is left of the
+    function budget as turn_timeout. The approve's /confirm (which may render
+    a report) must be cut off inside it, keeping room for the messages
+    after it, not wait the full CONFIRM_TIMEOUT and be killed mid-send."""
+    from bot.platform.client import CONFIRM_TIMEOUT
+
+    waits = []
+
+    class Timed(FakeApi):
+        async def confirm(self, chat_id, pending_id, action, *, timeout=None):
+            waits.append(timeout)
+            return await super().confirm(chat_id, pending_id, action, timeout=timeout)
+
+    wa = FakeWa()
+    [ctx] = parse_envelopes(wa_body([interactive("button_reply", encode("w", "y", "p1"))]))
+    await handle_inbound(ctx, WhatsAppChannel(wa, Timed()), Timed(), turn_timeout=40)
+    assert waits == [30.0]  # 40 left, 10 kept back for what follows
+    assert waits[0] < CONFIRM_TIMEOUT
+    assert [b for _, b in wa.texts] == [S.APPROVED]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_approve_says_it_may_have_gone_through_not_that_it_was_not_processed():
+    api = FakeApi(confirm_result=PlatformUnavailable(0, "ReadTimeout"))
+    wa = await run(interactive("button_reply", encode("w", "y", "p1")), api)
+    assert [b for _, b in wa.texts] == [S.CONFIRM_NO_ANSWER]
+    assert "wasn't processed" not in wa.all_text
 
 
 @pytest.mark.asyncio

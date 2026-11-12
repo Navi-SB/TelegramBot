@@ -157,7 +157,7 @@ class FakeApi:
             raise PlatformUnavailable(0, "ReadTimeout")
         return self._turn
 
-    async def confirm(self, chat_id, pending_id, action):
+    async def confirm(self, chat_id, pending_id, action, *, timeout=None):
         self.calls.append(f"confirm:{action}")
         if self._fail == "already":
             raise PlatformError(409, "already applied")
@@ -1149,6 +1149,111 @@ async def test_a_lost_reply_after_an_approve_is_not_reported_as_a_failure():
     tg = await run(cb(encode("w", "y", "p1")), api, DropsSecond())
     assert S.UNEXPECTED not in tg.all_text
     assert [f[0] for f in tg.files] == ["photo", "document"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_approved_message_still_lets_the_reply_and_files_through():
+    """The change is made before APPROVED is sent. One transport error or
+    5xx on it (send_message never retries those) used to escape _confirm:
+    the chat got "Something went wrong" about an applied change, and the
+    reply and the report's files, made only at /confirm, never came."""
+    class DropsApproved(FakeTg):
+        async def send_safe(self, chat_id, text, *, reply_markup=None):
+            if text == S.APPROVED:
+                raise TelegramError(502, "Bad Gateway")
+            return await super().send_safe(chat_id, text, reply_markup=reply_markup)
+
+    api = FakeApi(confirm_result=APPROVED_EXPORT)
+    tg = await run(cb(encode("w", "y", "p1")), api, DropsApproved())
+    assert S.UNEXPECTED not in tg.all_text
+    assert any("Exported the Period Rundown" in t for _, t in tg.sent)
+    assert [f[0] for f in tg.files] == ["photo", "document"]
+
+
+class _Clock:
+    """Stands in for the dispatcher's clock only (asyncio keeps the real
+    one), so a test can say how much of the deadline is left."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+@pytest.mark.asyncio
+async def test_the_confirm_wait_is_capped_by_the_chats_deadline():
+    from bot.platform.client import CONFIRM_TIMEOUT
+
+    waits = []
+
+    class Timed(FakeApi):
+        async def confirm(self, chat_id, pending_id, action, *, timeout=None):
+            waits.append(timeout)
+            return await super().confirm(chat_id, pending_id, action, timeout=timeout)
+
+    await handle_update(cb(encode("w", "y", "p1")), FakeTg(), Timed(), turn_timeout=265)
+    await handle_update(cb(encode("w", "y", "p1")), FakeTg(), Timed(), turn_timeout=30)
+    await handle_update(cb(encode("w", "y", "p1")), FakeTg(), Timed(), turn_timeout=3)
+    assert waits == [CONFIRM_TIMEOUT, 20.0, 5.0]
+
+
+@pytest.mark.asyncio
+async def test_files_are_not_started_when_the_deadline_is_too_close(monkeypatch, caplog):
+    from bot.core import dispatch
+
+    clock = _Clock()
+    monkeypatch.setattr(dispatch, "time", clock)
+
+    class SlowConfirm(FakeApi):
+        async def confirm(self, *a, **kw):
+            clock.now += 27  # of 30: 3 s left, under _FILE_MIN_SECONDS
+            return await super().confirm(*a, **kw)
+
+    api = SlowConfirm(confirm_result=APPROVED_EXPORT)
+    with caplog.at_level(logging.INFO, logger="tropis.bot"):
+        tg = await run(cb(encode("w", "y", "p1")), api)
+    assert api.file_calls == [] and tg.files == []
+    assert [t for _, t in tg.sent].count(S.FILE_SEND_FAILED) == 1
+    assert S.APPROVED in [t for _, t in tg.sent]
+    assert '"outcome": "out_of_time"' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_file_post_that_hangs_is_cut_off_at_the_deadline(monkeypatch):
+    from bot.core import dispatch
+
+    clock = _Clock()
+    monkeypatch.setattr(dispatch, "time", clock)
+
+    class SlowFile(FakeApi):
+        async def file(self, chat_id, export_id):
+            clock.now += 29.95  # of 30: 0.05 s left for the post
+            return await super().file(chat_id, export_id)
+
+    class Hangs(FakeTg):
+        async def send_photo(self, *a, **kw):
+            await asyncio.Event().wait()
+
+    api = SlowFile(confirm_result={**APPROVED_EXPORT, "files": file_items(7)})
+    tg = await asyncio.wait_for(run(cb(encode("w", "y", "p1")), api, Hangs()), 5)
+    assert S.FILE_SEND_FAILED in [t for _, t in tg.sent]
+    assert S.UNEXPECTED not in tg.all_text
+
+
+@pytest.mark.asyncio
+async def test_a_slow_approve_says_it_may_have_gone_through():
+    api = FakeApi(confirm_result=PlatformUnavailable(0, "ReadTimeout"))
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    assert [t for _, t in tg.sent] == [S.CONFIRM_NO_ANSWER]
+    assert S.PLATFORM_DOWN not in tg.all_text
+
+
+@pytest.mark.asyncio
+async def test_an_approve_that_never_reached_the_platform_says_it_was_not_processed():
+    api = FakeApi(confirm_result=PlatformUnavailable(0, "ConnectError"))
+    tg = await run(cb(encode("w", "y", "p1")), api)
+    assert [t for _, t in tg.sent] == [S.PLATFORM_DOWN]
 
 
 def test_the_file_messages_name_the_reports_page_in_plain_words():

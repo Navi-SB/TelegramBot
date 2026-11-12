@@ -128,6 +128,15 @@ REJECTED = "❌ Change rejected."
 
 ALREADY_RESOLVED = "Already resolved."
 
+# An approve the platform got but didn't answer in time. It may have made the
+# change, so "your message wasn't processed" could be false; a second tap
+# finds out without doing it twice.
+CONFIRM_NO_ANSWER = (
+    "⏳ Tropis didn't answer in time, so the change may or may not have been "
+    "made. Tap <b>Approve</b> again to check: it says \"Already resolved\" if "
+    "it went through. To get the report's files, ask me to show the report."
+)
+
 # A report image or PDF that was made but couldn't be fetched or posted here.
 FILE_SEND_FAILED = (
     "⚠️ The file could not be sent here; open it on the "
