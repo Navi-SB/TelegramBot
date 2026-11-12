@@ -20,7 +20,7 @@ from bot.whatsapp.api import (
 )
 from bot.whatsapp.channel import WhatsAppChannel
 from bot.whatsapp.parse import parse_envelopes
-from tests.test_dispatch import SEAT, FakeApi
+from tests.test_dispatch import CAPTION, FILES, SEAT, FakeApi, file_items
 from tests.test_wa_parse import NUM, doc_msg, text_msg, wa_body
 
 
@@ -32,13 +32,34 @@ class FakeWa:
         self.buttons: list[tuple[str, str, list]] = []
         self.lists: list[tuple[str, str, list]] = []
         self.reads: list[tuple[str, bool]] = []
+        # Outbound files: uploads (mime, filename, size) and the messages
+        # that name them; `order` is everything sent, in order.
+        self.uploads: list[tuple[str, str, int]] = []
+        self.media: list[tuple[str, str, str | None, str | None]] = []  # type, id, name, caption
+        self.order: list[str] = []
 
     async def send_text(self, to, body):
         self.texts.append((str(to), body))
+        self.order.append("text")
+        return "wamid.out"
+
+    async def upload_media(self, data, mime, filename):
+        self.uploads.append((mime, filename, len(data)))
+        return f"media{len(self.uploads)}"
+
+    async def send_image(self, to, media_id, caption=None):
+        self.media.append(("image", media_id, None, caption))
+        self.order.append("image")
+        return "wamid.out"
+
+    async def send_document(self, to, media_id, filename, caption=None):
+        self.media.append(("document", media_id, filename, caption))
+        self.order.append("document")
         return "wamid.out"
 
     async def send_buttons(self, to, body, buttons):
         self.buttons.append((str(to), body, buttons))
+        self.order.append("buttons")
         return "wamid.out"
 
     async def send_list(self, to, body, button_text, rows, section_title="Options"):
@@ -718,3 +739,93 @@ def test_whatsapp_file_strings_state_the_cap_and_how_to_send():
     assert f"{MAX_BYTES // (1024 * 1024)} MB" in S.FILE_TOO_LARGE
     assert "PDF or Word file" in S.HELP and "caption" in S.HELP
     assert "PDF" in S.TEXT_ONLY and ".docx" in S.TEXT_ONLY
+
+
+# ---------------------------------------------------------------------------
+# report files and what an approve did (NAV-TBD-82): upload, then send by id
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_a_turn_with_files_sends_the_text_then_the_image_then_the_pdf_then_cards():
+    api = FakeApi(turn=turn_result(
+        reply="Here is this week's rundown.", files=file_items(7, 6),
+        pending=[{"pending_id": "p1", "tool": "add_cargo", "diff": {"summary": "Add 1"}}]))
+    wa = await run(text_msg("show me the report"), api)
+    assert wa.order == ["text", "image", "document", "buttons"]
+    assert wa.uploads == [("image/png", "Weekly Period Rundown 2026-11-10.png", len(FILES[7][0])),
+                          ("application/pdf", "Weekly Period Rundown 2026-11-10.pdf",
+                           len(FILES[6][0]))]
+    assert wa.media == [("image", "media1", None, CAPTION),
+                        ("document", "media2", "Weekly Period Rundown 2026-11-10.pdf", None)]
+
+
+@pytest.mark.asyncio
+async def test_an_approve_shows_what_it_did_then_the_files():
+    api = FakeApi(confirm_result={
+        "status": "applied", "tool_name": "export_period_report", "after": {},
+        "reply": "Exported the Period Rundown as an image and a PDF.",
+        "vessel_outputs": ["✓ Market notes"], "files": file_items(7, 6)})
+    wa = await run(interactive("button_reply", encode("w", "y", "p1")), api)
+    assert wa.order == ["text", "text", "text", "image", "document"]
+    assert [b for _, b in wa.texts][:3] == [
+        S.APPROVED, "Exported the Period Rundown as an image and a PDF.", "✓ Market notes"]
+
+
+@pytest.mark.asyncio
+async def test_an_approve_from_an_old_platform_says_approved_and_nothing_else():
+    wa = await run(interactive("button_reply", encode("w", "y", "p1")), FakeApi())
+    assert [b for _, b in wa.texts] == [S.APPROVED] and wa.uploads == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_approve_is_readable():
+    detail = "Approve this on the Reports page or in a web or mobile chat."
+    api = FakeApi(confirm_result=PlatformError(422, detail))
+    wa = await run(interactive("button_reply", encode("w", "y", "p1")), api)
+    assert [b for _, b in wa.texts] == [S.confirm_failed(detail, refused=True)]
+    assert S.UNEXPECTED not in wa.all_text
+
+
+@pytest.mark.asyncio
+async def test_a_png_too_big_for_a_whatsapp_image_goes_as_a_document():
+    """WhatsApp takes images up to 5 MB, half of Telegram's photo limit."""
+    big = b"\x89PNG" + b"p" * 6_000_000
+    api = FakeApi(turn=turn_result(reply="Here.", files=file_items(7)),
+                  files={7: (big, "image/png", "Rundown.png")})
+    wa = await run(text_msg("show the report"), api)
+    assert wa.media == [("document", "media1", "Rundown.png", CAPTION)]
+    assert wa.uploads[0][0] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_a_removed_file_says_the_platforms_sentence():
+    removed = "This file was removed after 30 days; export again."
+    api = FakeApi(turn=turn_result(reply="Here.", files=file_items(7, 6)),
+                  files={7: PlatformError(410, removed), 6: FILES[6]})
+    wa = await run(text_msg("show the report"), api)
+    assert S.file_unavailable(removed) in [b for _, b in wa.texts]
+    assert [m[0] for m in wa.media] == ["document"]
+
+
+@pytest.mark.asyncio
+async def test_an_upload_meta_refuses_says_the_file_could_not_be_sent():
+    class NoUploadWa(FakeWa):
+        async def upload_media(self, data, mime, filename):
+            raise WhatsAppError(131053, None, "Media upload error")
+
+    api = FakeApi(turn=turn_result(reply="Here.", files=file_items(7, 6)))
+    wa = await run(text_msg("show the report"), api, wa=NoUploadWa())
+    assert [b for _, b in wa.texts].count(S.FILE_SEND_FAILED) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_chat_during_a_media_send_is_marked_blocked_once():
+    class BlockedOnMediaWa(FakeWa):
+        async def send_image(self, to, media_id, caption=None):
+            raise WhatsAppUndeliverable(131026, None, "Message Undeliverable.")
+
+    api = FakeApi(turn=turn_result(reply="Here.", files=file_items(7, 6)))
+    wa = await run(text_msg("show the report"), api, wa=BlockedOnMediaWa())
+    assert api.calls.count("blocked") == 1
+    # once blocked, nothing more is attempted — not the PDF, not a notice
+    assert wa.media == [] and len(wa.uploads) == 1
+    assert S.FILE_SEND_FAILED not in wa.all_text
